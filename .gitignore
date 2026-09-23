@@ -1,0 +1,15 @@
+data/
+.env
+*.log
+node_modules/
+ios/build/
+**/xcuserdata/
+*.xcuserstate
+.DS_Store
+
+*.p8
+
+.private-gateway/
+dist/
+
+backups/

@@ -1,0 +1,26 @@
+name: mohua-tests
+services:
+  database:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: mohua_test
+      POSTGRES_USER: mohua_test
+      POSTGRES_PASSWORD: local-disposable-test-only
+    ports:
+      - '127.0.0.1:54329:5432'
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U mohua_test -d mohua_test']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      TEST_DATABASE_URL: postgres://mohua_test:local-disposable-test-only@database:5432/mohua_test
+    depends_on:
+      database:
+        condition: service_healthy

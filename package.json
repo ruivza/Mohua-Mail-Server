@@ -1,0 +1,24 @@
+{
+  "name": "mohua-server",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "export:server": "node scripts/export-server.mjs",
+    "configure": "node scripts/configure.mjs",
+    "docker:up": "docker compose up -d --build --wait",
+    "test:docker": "docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests"
+  },
+  "dependencies": {
+    "imapflow": "2.0.5",
+    "ipaddr.js": "2.5.0",
+    "mailparser": "3.9.28",
+    "nodemailer": "10.0.10",
+    "pg": "8.23.0"
+  }
+}
