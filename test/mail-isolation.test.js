@@ -94,3 +94,16 @@ test("lost control registration fails closed and clears live mailbox capabilitie
   assert.equal(f.worker.leases.entries.size,0);
  }finally{await f.close();}
 });
+
+
+test('worker checks preview demand through the authenticated broker',async()=>{
+ const f=await fixture();
+ try {
+  assert.equal(await f.worker.mail.needsPreview(f.id),false);
+  let checked;
+  f.control.push.needsPreview=async id=>{checked=id;return true;};
+  assert.equal(await f.worker.mail.needsPreview(f.id),true);
+  assert.equal(checked,f.id);
+  await assert.rejects(f.worker.db.call('needsPreview',{accountId:null}),e=>e.status===400);
+ }finally{await f.close();}
+});

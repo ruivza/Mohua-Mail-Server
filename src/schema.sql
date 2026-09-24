@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),token_hash TEXT UNIQUE NOT NULL,name TEXT NOT NULL,expires BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS invites(token_hash TEXT PRIMARY KEY,expires BIGINT NOT NULL);
-CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),email TEXT NOT NULL,mode TEXT NOT NULL,imap_host TEXT NOT NULL,imap_port INTEGER NOT NULL,smtp_host TEXT NOT NULL,smtp_port INTEGER NOT NULL,credential TEXT NOT NULL,monitor_enabled INTEGER NOT NULL DEFAULT 0,UNIQUE(user_id,email));
+CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),email TEXT NOT NULL,mode TEXT NOT NULL,imap_host TEXT NOT NULL,imap_port INTEGER NOT NULL,smtp_host TEXT NOT NULL,smtp_port INTEGER NOT NULL,credential TEXT NOT NULL,monitor_enabled INTEGER NOT NULL DEFAULT 1,UNIQUE(user_id,email));
 CREATE TABLE IF NOT EXISTS administrators(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_sessions(id TEXT PRIMARY KEY,admin_id TEXT NOT NULL REFERENCES administrators(id),token_hash TEXT UNIQUE NOT NULL,name TEXT NOT NULL,expires BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS client_devices(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),name TEXT NOT NULL,platform TEXT NOT NULL,created BIGINT NOT NULL,revoked BIGINT,push_token TEXT,push_environment TEXT,push_token_hash TEXT,push_registered BIGINT NOT NULL DEFAULT 0,push_last_sent BIGINT NOT NULL DEFAULT 0,push_error TEXT,push_enabled INTEGER NOT NULL DEFAULT 1,push_credential TEXT,push_not_before BIGINT NOT NULL DEFAULT 0);
@@ -22,3 +22,21 @@ CREATE INDEX IF NOT EXISTS push_due ON push_jobs(next_at);
 CREATE TABLE IF NOT EXISTS encryption_check(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
 
 CREATE INDEX IF NOT EXISTS outbox_created ON outbox(created);
+
+ALTER TABLE client_devices ADD COLUMN IF NOT EXISTS push_alerts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE push_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'sync';
+ALTER TABLE push_jobs ADD COLUMN IF NOT EXISTS alert_generation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE push_jobs ADD COLUMN IF NOT EXISTS notification TEXT;
+ALTER TABLE client_devices ADD COLUMN IF NOT EXISTS notification_key TEXT;
+ALTER TABLE client_devices ADD COLUMN IF NOT EXISTS push_credential_hash TEXT;
+
+-- Enable background monitoring once for existing mailboxes, without overriding
+-- later administrative changes on every server restart.
+ALTER TABLE accounts ALTER COLUMN monitor_enabled SET DEFAULT 1;
+CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY);
+WITH migration AS (
+  INSERT INTO schema_migrations(name) VALUES ('default-mailbox-monitoring-v1')
+  ON CONFLICT DO NOTHING RETURNING name
+)
+UPDATE accounts SET monitor_enabled=1
+WHERE mode='proxy' AND monitor_enabled=0 AND EXISTS (SELECT 1 FROM migration);

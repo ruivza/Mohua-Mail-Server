@@ -356,6 +356,9 @@ app.server.on("request", async (req, res) => {
           .run("fixture-proxy", "fixture-direct");
         validity = 7n;
         resetMail();
+        // Revoking fixture devices also revokes their in-memory mail leases.
+        // Restore synthetic authorization so sync tests never need real credentials.
+        for (const id of ["fixture-proxy", "fixture-direct"]) await authorizeFixture(app, id);
         await app.db.prepare("DELETE FROM invites").run();
         await app.db
           .prepare("INSERT INTO invites VALUES(?,?)")
@@ -422,6 +425,7 @@ app.server.on("request", async (req, res) => {
                 .get(await latest())
             )?.push_enabled,
           ),
+          alertsEnabled: Boolean((await app.db.prepare("SELECT push_alerts FROM client_devices WHERE id=?").get(await latest()))?.push_alerts),
           cancelledDownloads,
           sentMessages,
           inlineDownloads,

@@ -57,9 +57,13 @@ export class MailBroker {
         const devices=await this.db.prepare("SELECT d.id FROM client_devices d JOIN users u ON u.id=d.user_id WHERE d.revoked IS NULL AND u.active=1").all();
         result={boot:this.boot,accounts,devices:devices.map(d=>d.id),invalidations:Object.fromEntries(this.invalidations)};
       }else if(b.op==="authorize")result=await this.scope(b.token,b.accountId,b.credential);
+      else if(b.op==="needsPreview"){
+        if(typeof b.accountId!=="string")fail(400,"Invalid mailbox");
+        result=await this.push.needsPreview(b.accountId);
+      }
       else if(b.op==="changed"||b.op==="hint"){
         if(typeof b.accountId!=="string")fail(400,"Invalid mailbox");
-        if(b.op==="changed")await this.devices.changed(b.accountId);
+        if(b.op==="changed")await this.devices.changed(b.accountId, b.kind === "new_mail" ? "new_mail" : "sync", b.notification);
         else if(now-(this.hints.get(b.accountId)||0)>3600000){this.hints.set(b.accountId,now);await this.push.enqueue(b.accountId);}
         result={ok:true};
       }else if(b.op==="outboxList"){

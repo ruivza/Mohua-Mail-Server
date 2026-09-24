@@ -1,8 +1,8 @@
 # Push gateway protocol v1
 
-> 本文描述 Mohua 改名后的协议要求。本次仅修改邮件项目，未修改或部署 Kookaburra Relay 网关；现有网关需要另行适配后才能使用新版推送。
+> This document includes the optional encrypted `encrypted_alert` extension. Deploy matching iOS, Server and gateway versions; see [encrypted notifications](ENCRYPTED_NOTIFICATIONS.md).
 
-All production endpoints require HTTPS at one origin. No redirects. JSON bodies and responses. No mailbox content is accepted for delivery. IDs are 1–100 ASCII letters, digits, `_` or `-`; credentials are random 32-byte base64url values.
+All production endpoints require HTTPS at one origin. No redirects. JSON bodies and responses. Only encrypted sender/subject previews are accepted for `encrypted_alert`; no plaintext mail content or body is accepted. IDs are 1–100 ASCII letters, digits, `_` or `-`; credentials are random 32-byte base64url values.
 
 ## Client enrollment
 
@@ -17,7 +17,7 @@ All production endpoints require HTTPS at one origin. No redirects. JSON bodies 
 - `GET /v1/status?appId=mohua`: `{protocol:1,appId,ready:boolean,kinds:["sync"]}`; readiness is not proof of device delivery.
 - `POST /v1/validate`, bearer delivery credential; body `{appId,deviceId,serverId,kind:"sync"}`. Response 200 `{valid:true}`.
 - `POST /v1/notify`, same scope and credential; response 200 `{accepted:true}` means APNs accepted it, not that the device processed it.
-- Gateway sends only `{aps:{"content-available":1},mohua:{version:1,deviceId,appId}}`.
+- For `sync`, gateway sends `{aps:{"content-available":1},mohua:{version:1,deviceId,appId}}`.
 - 410 invalidates a registration; 403 means wrong scope; 429/5xx/network failure are retryable. Unknown fields are never forwarded to APNs.
 
 ## Disable and revoke
@@ -30,9 +30,9 @@ Server admins use GET/PATCH `/api/admin/push` and POST `/api/admin/push/test`. P
 
 Each application has an immutable gateway application ID, independent enablement, Apple topic/key/environment configuration and registration revision. The client bundles its expected ID (`MohuaGatewayAppID` for iOS); the business Server sends the same ID for validation and delivery. Mohua uses `mohua`. Missing `appId`, `platform` and `channel` retain only the legacy Mohua/iOS/APNs defaults; they are never inferred from a caller-supplied device token.
 
-Credentials are bound to app, device, Server instance and `sync` purpose. A caller cannot substitute a different application or request a visible alert. Token ownership, rate limits by token, and replacement are scoped to app/channel/environment. Changing an app's push configuration or enablement invalidates only that app's registrations; a name-only edit preserves them. The same Apple topic/environment cannot be assigned to two gateway apps within a team.
+Credentials are bound to app, device and Server instance. Existing/default `sync` purpose cannot send visible alerts. Explicit `purpose:"encrypted_alert"` enrollment for an enabled APNs app allows `sync` and `encrypted_alert`; the confirmed grant echoes its purpose. A caller cannot substitute a different application or elevate an existing sync grant. Token ownership, rate limits by token, and replacement are scoped to app/channel/environment. Changing an app's push configuration or enablement invalidates only that app's registrations; a name-only edit preserves them. The same Apple topic/environment cannot be assigned to two gateway apps within a team.
 
-Currently only `ios` + `apns` + `sync` is implemented. Android FCM and vendor channel IDs (`huawei`, `xiaomi`, `oppo`, `vivo`, `honor`) are reserved, explicitly marked unimplemented, and enrollment returns 501. They are not a working Android implementation. Future adapters must implement their own device proof and map supported message kinds without assuming APNs silent-wake semantics. Visible notifications must be a separate capability and credential purpose.
+The original v1 baseline is `ios` + `apns` + `sync`; the optional extension below adds encrypted `encrypted_alert`. FCM supports sync and ordinary alert, but encrypted_alert enrollment returns 501. Vendor channel IDs (`huawei`, `xiaomi`, `oppo`, `vivo`, `honor`) remain unimplemented. Future adapters must implement their own device proof and map supported message kinds without assuming APNs silent-wake semantics. Visible notifications require an explicit capability grant.
 
 The private administration API uses GET/POST `/admin/apps` and PUT `/admin/apps/:id`. Listing returns applications plus channel capabilities, without private keys. Update accepts `name`, `enabled`, and optional `apns` (`teamId`, `keyId`, `topic`, `environment`, optional `privateKey` to replace the stored key). The old singleton `/admin/config` is removed. Migration preserves its encrypted Apple configuration as `mohua` and invalidates old, unscoped gateway registrations once; clients re-enroll.
 
@@ -46,3 +46,24 @@ The private administration API uses GET/POST `/admin/apps` and PUT `/admin/apps/
 状态包括 queued、sending、retrying、accepted、failed、unknown、cancelled；accepted 是厂商接受而非设备送达。429 / 5xx 的异步重试由网关负责；unknown 表示结果无法确定，不自动重发。幂等保证限于任务记录保留期（当前 30 天）。现有 Mohua Server 继续使用同步接口，不因扩展发生行为变化。
 
 FCM 登记指定 `platform:"android"`、`channel:"fcm"`、`environment:"production"`。token 必须保留大小写。FCM `data.mohuaRegistration` 为挑战对象的 JSON 字符串，解析后调用原确认 API；`data.mohua` 为同步提示对象的 JSON 字符串。查询 FCM 配置就绪使用 `/v1/status?appId=...&channel=fcm`；不指定 channel 时仍查询 APNs。未实现厂商返回 501，不回退到其他通道。
+
+
+## 资源限制与重试兼容
+
+推送相关请求保留 429 / 503 的 `Retry-After`，支持秒数与 HTTP 日期，最大 24 小时。登记 / 确认 / 凭证上传失败采用从 60 秒开始、最大 1 小时的指数退避，取服务端冷却要求中的较长时间，并增加最多 5 秒抖动。冷却状态保存在本机偏好中，重启 App 后继续遵守；到期后在下次前台触发时重试，不依赖后台定时执行。
+
+临时网络或 5xx / 限流错误不会销毁已经保存在 Keychain 中的有效设备凭证。已经确认但尚未成功上传业务 Server 的凭证继续保留，后续优先重新上传；明确失效 / 不匹配才重新登记。撤销失败也持久化冷却并保留注销凭证。登记网络超时保留未过期的 nonce，以接收可能已发出的挑战。
+
+兼容 `mohuaRegistration` / `mohua` 和网关既有 `perchRegistration` / `perch` 消息字段，并继续校验 appId、deviceId、nonce 与 serverId。此轮未接入 App Attest，模拟器测试不代表 APNs 真机送达验证。
+
+## Encrypted new-mail capability
+
+`GET /v1/status?appId=mohua` advertises `kinds:["sync","encrypted_alert"]` and `notificationEncryption:"p256-hkdf-sha256-aes256gcm-v1"`. Capabilities are the intersection of enabled app kinds and channel support. Server exposes the same capability in `/api/client/push/config` only when supported by its gateway.
+
+Client enrollment explicitly requests `purpose:"encrypted_alert"`; after successful proof it uploads `{enabled:true,alertsEnabled:true,notificationKey:{algorithm,keyId,publicKey},credential,revision}` to its business Server. Server validates `kind:"encrypted_alert"` against the grant before enabling alerts. Turning alerts off downgrades queued work to sync.
+
+For `/v1/notify` or `/v1/jobs`, supply `{appId,deviceId,serverId,kind:"encrypted_alert",encryptedNotification}` (plus `requestId` for jobs). The gateway validates a bounded ciphertext envelope and stores only that envelope; job query responses omit it. For generic fallback, `encryptedNotification` can be absent. No caller-specified plaintext title/body is forwarded.
+
+APNs uses type `alert`, priority `10`, app-configured fallback `aps.alert` and optional `sound:"default"`, `mutable-content:1` and `content-available:1`. The `relay` scope includes version, appId, deviceId, serverId and kind. The notification extension decrypts the envelope locally. AAD, sizes, key lifecycle and fallback behavior are specified in [ENCRYPTED_NOTIFICATIONS.md](ENCRYPTED_NOTIFICATIONS.md).
+
+网关是通用推送服务：按应用启用 `sync`、`alert`、`encrypted_alert`；新应用及旧应用默认仅 `sync`。Mohua 只申请 `sync` 与 `encrypted_alert`，不发送普通明文邮件通知。更改通知能力保留已有登记：新增能力需客户端申请对应授权，关闭能力仅禁止该类型并取消其未完成任务；其他能力不受影响。修改兜底文案无需重新登记。加密通知默认请求系统通知音，声音由用户在手机系统设置中控制。其他应用可以使用 `alert` 发送普通标题和内容，或自行约定密文内容；邮件字段与加密 AAD 属于 Mohua 业务协议。

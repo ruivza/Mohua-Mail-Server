@@ -18,7 +18,7 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
     mail?.stop(id);reader?.invalidate(id);sender?.invalidate(id);mail?.status(id,"authorization_required");
     if(!leases.entries.size)setImmediate(()=>{if(!closed&&!leases.entries.size)onEmpty();});
   }});
-  mail=new MailService({db,leases,...mailOptions,onChange:id=>db.call("changed",{accountId:id})});
+  mail=new MailService({db,leases,...mailOptions,needsPreview:id=>db.call("needsPreview",{accountId:id}),onChange:(id,kind,notification)=>db.call("changed",{accountId:id,kind,notification})});
   reader=new MailReader(mail);sender=new MailSender({db,reader,mail});await sender.initialize();
   async function inventory(){
     const snapshot=accounts.map(a=>({id:a.id,...mail.state(a.id),authorization:leases.status(a)}));

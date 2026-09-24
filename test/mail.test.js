@@ -203,3 +203,91 @@ test('stopping a watcher during its initial change callback cannot report listen
     assert.equal(f.service.jobs.size,0);
   } finally {release?.();await starting;await f.service.close();}
 });
+
+
+test("only an inbox count increase emits a new mail alert", async () => {
+  const kinds = [];
+  const f = fixture({ onChange: (id, kind = 'sync') => kinds.push(kind) });
+  try {
+    await f.service.start(f.account);
+    for (const [event, detail] of [
+      ['exists', { path: 'INBOX', prevCount: 2, count: 3 }],
+      ['flags', { path: 'INBOX' }], ['expunge', { path: 'INBOX' }],
+      ['exists', { path: 'INBOX', prevCount: 3, count: 3 }],
+      ['exists', { path: 'Sent', prevCount: 2, count: 3 }],
+    ]) {
+      f.client.emit(event, detail);
+      await Promise.all([...f.service.background]);
+    }
+    assert.deepEqual(kinds, ['sync','new_mail','sync','sync','sync','sync']);
+  } finally { await f.service.close(); }
+});
+
+
+test('notification preview fetches envelope only and excludes body', async () => {
+  const changes=[]; const f=fixture({needsPreview:async()=>true,onChange:(...args)=>changes.push(args)});
+  try {
+    await f.service.start(f.account);
+    f.client.fetchOne=async(range,query)=>{
+      assert.equal(range,'*');assert.deepEqual(query,{envelope:true});
+      return {envelope:{from:[{name:'Sender',address:'sender@example.test'}],subject:'Subject'},source:'BODY NOT REQUESTED'};
+    };
+    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    await Promise.all([...f.service.background]);
+    assert.deepEqual(changes.at(-1),['a','new_mail',{sender:'Sender',subject:'Subject'}]);
+  } finally {await f.service.close();}
+});
+
+
+test('no preview recipient means no envelope read or plaintext metadata', async () => {
+  const changes=[]; const f=fixture({onChange:(...args)=>changes.push(args)});
+  let reads=0;
+  try {
+    await f.service.start(f.account);
+    f.client.fetchOne=async()=>{reads++;return {envelope:{subject:'private'}};};
+    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    await Promise.all([...f.service.background]);
+    assert.equal(reads,0);
+    assert.deepEqual(changes.at(-1),['a','new_mail',undefined]);
+  } finally {await f.service.close();}
+});
+
+test('envelope timeout delivers generic alert before reconnecting', async () => {
+  const changes=[]; const f=fixture({timeoutMs:10,needsPreview:async()=>true,onChange:(...args)=>changes.push(args)});
+  try {
+    await f.service.start(f.account); changes.length=0;
+    f.client.fetchOne=()=>new Promise(()=>{});
+    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    await Promise.all([...f.service.background]);
+    assert.deepEqual(changes,[['a','new_mail',undefined]]);
+    assert.equal(f.service.state('a').connectionStatus,'reconnecting');
+  } finally {await f.service.close();}
+});
+
+test('stopping during envelope read suppresses timeout fallback', async () => {
+  const changes=[]; let started;
+  const ready=new Promise(resolve=>started=resolve);
+  const f=fixture({timeoutMs:10,needsPreview:async()=>true,onChange:(...args)=>changes.push(args)});
+  try {
+    await f.service.start(f.account); changes.length=0;
+    f.client.fetchOne=()=>{started();return new Promise(()=>{});};
+    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    await ready; f.service.stop('a');
+    await Promise.all([...f.service.background]);
+    assert.deepEqual(changes,[]);
+  } finally {await f.service.close();}
+});
+
+
+test('preview lookup failure skips content and preserves generic notification', async () => {
+  const changes=[];const f=fixture({needsPreview:async()=>{throw Error('unavailable');},onChange:(...args)=>changes.push(args)});
+  let reads=0;
+  try {
+    await f.service.start(f.account);
+    f.client.fetchOne=async()=>{reads++;};
+    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    await Promise.all([...f.service.background]);
+    assert.equal(reads,0);
+    assert.deepEqual(changes.at(-1),['a','new_mail',undefined]);
+  } finally {await f.service.close();}
+});

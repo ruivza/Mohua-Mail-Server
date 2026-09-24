@@ -34,6 +34,7 @@ export class MailService {
     timeoutMs = 30000,
     retryMs = 60000,
     onChange = () => {},
+    needsPreview = async () => false,
   }) {
     Object.assign(this, {
       db,
@@ -44,6 +45,7 @@ export class MailService {
       timeoutMs,
       retryMs,
       onChange,
+      needsPreview,
     });
     // Drop known library references when transports close. This is not secure
     // erasure of JS strings or protection against a compromised runtime.
@@ -241,7 +243,39 @@ export class MailService {
               if (job.cancelled || this.closed) return;
               const current = await this.active(account.id);
               if (!current || job.cancelled || this.closed) return;
-              await this.onChange(account.id);
+              const newMail = event === "exists" && detail.path === "INBOX"
+                && Number.isInteger(detail.prevCount) && detail.count > detail.prevCount;
+              let notification;
+              let envelopeTimedOut = false;
+              let preview = false;
+              if (newMail) {
+                try { preview = await this.needsPreview(account.id); } catch { /* Fail closed for content access. */ }
+              }
+              if (job.cancelled || this.closed) return;
+              if (newMail && preview) {
+                this.leases?.assert(current);
+                let timer;
+                try {
+                  const message = await Promise.race([
+                    client.fetchOne("*", { envelope: true }),
+                    new Promise((_, reject) => { timer = setTimeout(() => {
+                      envelopeTimedOut = true; reject(Error("Envelope timeout"));
+                    }, this.timeoutMs); }),
+                  ]);
+                  const from = message?.envelope?.from?.[0];
+                  const clean = (value, limit) => Array.from(String(value || "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").trim()).slice(0,limit).join("");
+                  notification = {sender:clean(from?.name || from?.address,120),subject:clean(message?.envelope?.subject,400)};
+                } catch { /* Missing metadata falls back to a generic alert, never a body fetch. */ }
+                finally { clearTimeout(timer); }
+              }
+              try {
+                if (job.cancelled || this.closed || !await this.active(account.id)) return;
+                this.leases?.assert(current);
+                await this.onChange(account.id, newMail ? "new_mail" : "sync", notification);
+              } finally {
+                // Deliver the fallback before closing the stalled connection cancels this job.
+                if (envelopeTimedOut) client.close();
+              }
               if (event === "exists" && !job.cancelled && !this.closed)
                 this.status(account.id, "listening", {
                   lastChangeAt: new Date().toISOString(),

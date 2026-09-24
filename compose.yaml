@@ -29,6 +29,8 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Run node scripts/configure.mjs first}
       SETUP_TOKEN: ${SETUP_TOKEN:?Run node scripts/configure.mjs first}
       OFFICIAL_PUSH_GATEWAY_URL: ${OFFICIAL_PUSH_GATEWAY_URL:-}
+      GATEWAY_SERVER_CREDENTIAL: ${GATEWAY_SERVER_CREDENTIAL:-}
+      GATEWAY_SERVER_CREDENTIAL_URL: ${GATEWAY_SERVER_CREDENTIAL_URL:-}
       MAIL_BROKER_TOKEN: ${MAIL_BROKER_TOKEN:?Run node scripts/configure.mjs first}
     depends_on:
       database:

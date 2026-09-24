@@ -1,3 +1,4 @@
+import { notificationKey } from "./notification-crypto.js";
 import { randomUUID } from "node:crypto";
 import { hashToken, newToken } from "./auth.js";
 
@@ -143,7 +144,7 @@ export class DeviceService {
       await this.pushService?.remove(id);
       await this.db
         .prepare(
-          "UPDATE client_devices SET revoked=?,push_credential=NULL,push_token=NULL,push_environment=NULL,push_token_hash=NULL,push_error=NULL WHERE id=?",
+          "UPDATE client_devices SET revoked=?,push_alerts=0,notification_key=NULL,push_credential_hash=NULL,push_credential=NULL,push_token=NULL,push_environment=NULL,push_token_hash=NULL,push_error=NULL WHERE id=?",
         )
         .run(Date.now(), id);
     });
@@ -163,7 +164,7 @@ export class DeviceService {
     );
   }
 
-  async changed(account) {
+  async changed(account, kind = "sync", notification) {
     if (
       !(await this.db
         .prepare("SELECT id FROM accounts WHERE id=?")
@@ -176,7 +177,7 @@ export class DeviceService {
       ON CONFLICT(account_id) DO UPDATE SET revision=mailbox_revisions.revision+1`,
       )
       .run(account);
-    await this.pushService?.enqueue(account);
+    await this.pushService?.enqueue(account, kind, notification);
   }
 
   async sync(device) {
@@ -226,20 +227,31 @@ export class DeviceService {
   async push(device, body, sessionId) {
     if (!body || typeof body !== "object" || Array.isArray(body))
       fail(400, "Invalid gateway registration");
+    if (body.alertsEnabled !== undefined && typeof body.alertsEnabled !== "boolean") fail(400, "Invalid alert preference");
     if (body.enabled === false || body.token === null) {
-      await this.db
-        .prepare(
-          `UPDATE client_devices SET push_enabled=0,push_credential=NULL,push_token=NULL,
-        push_environment=NULL,push_token_hash=NULL,push_error=NULL,push_registered=push_registered+1 WHERE id=?`,
-        )
-        .run(device.id);
-      await this.pushService?.remove(device.id);
+      await this.db.transaction(async () => {
+        await this.db
+          .prepare(
+            `UPDATE client_devices SET push_enabled=0,push_alerts=0,notification_key=NULL,push_credential_hash=NULL,push_credential=NULL,push_token=NULL,
+          push_environment=NULL,push_token_hash=NULL,push_error=NULL,push_registered=push_registered+1 WHERE id=?`,
+          )
+          .run(device.id);
+        await this.pushService?.remove(device.id);
+      });
       return;
     }
     if (body.enabled === true && body.credential === undefined) {
-      await this.db
-        .prepare("UPDATE client_devices SET push_enabled=1 WHERE id=?")
-        .run(device.id);
+      await this.db.transaction(async () => {
+        await this.db.prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE").get(device.id);
+        // Enabling alerts requires a validated mail-purpose credential. Disabling needs no grant.
+        if (body.alertsEnabled === false) {
+          await this.db.prepare("UPDATE client_devices SET push_alerts=0,notification_key=NULL,push_registered=push_registered+1 WHERE id=? AND push_alerts<>0").run(device.id);
+          await this.db.prepare("UPDATE push_jobs SET kind='sync',notification=NULL WHERE device_id=?").run(device.id);
+        }
+        await this.db
+          .prepare("UPDATE client_devices SET push_enabled=1 WHERE id=?")
+          .run(device.id);
+      });
       return;
     }
     if (
@@ -249,6 +261,7 @@ export class DeviceService {
       typeof body.revision !== "string"
     )
       fail(400, "Invalid gateway registration");
+    const key = body.alertsEnabled === true ? JSON.stringify(notificationKey(body.notificationKey)) : null;
     const generation = (await this.own(device.user_id, device.id))
       .push_registered;
     await this.pushService.validate(device, body);
@@ -278,13 +291,19 @@ export class DeviceService {
         )
         .get(device.user_id, device.id, Date.now());
       if (!validSession) fail(401, "Access revoked");
+      // Foreground re-registration must preserve pending encrypted notifications.
+      if (current.push_credential && current.push_credential_hash === hashToken(body.credential)
+        && current.push_alerts === (body.alertsEnabled === true ? 1 : 0) && current.notification_key === key) return;
       await this.db
         .prepare(
-          `UPDATE client_devices SET push_enabled=1,push_credential=?,push_token=NULL,
+          `UPDATE client_devices SET push_enabled=1,push_credential=?,push_credential_hash=?,push_alerts=?,notification_key=?,push_token=NULL,
       push_environment=NULL,push_token_hash=NULL,push_registered=?,push_error=NULL,push_not_before=0 WHERE id=?`,
         )
         .run(
           this.seal(body.credential),
+          hashToken(body.credential),
+          body.alertsEnabled === true ? 1 : 0,
+          key,
           Math.max(Date.now(), generation + 1),
           device.id,
         );

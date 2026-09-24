@@ -94,7 +94,7 @@ export class GatewaySettings {
     // Credentials are bound to one gateway configuration and cannot move to another host.
     await this.db
       .prepare(
-        `UPDATE client_devices SET push_credential=NULL,push_token=NULL,push_token_hash=NULL,
+        `UPDATE client_devices SET push_alerts=0,notification_key=NULL,push_credential_hash=NULL,push_credential=NULL,push_token=NULL,push_token_hash=NULL,
       push_environment=NULL,push_error=NULL,push_registered=push_registered+1`,
       )
       .run();
@@ -107,7 +107,7 @@ export class GatewayTransport {
     this.resolveHost = resolveHost;
     this.requests = new Set();
   }
-  async request(origin, path, { credential, body } = {}) {
+  async request(origin, path, { credential, serverCredential, body } = {}) {
     const url = new URL(path, gatewayURL(origin));
     const controller = new AbortController();
     this.requests.add(controller);
@@ -134,6 +134,7 @@ export class GatewayTransport {
               Accept: "application/json",
               ...(body ? { "Content-Type": "application/json" } : {}),
               ...(credential ? { Authorization: "Bearer " + credential } : {}),
+              ...(serverCredential ? { "X-Relay-Server-Credential": serverCredential } : {}),
             },
             lookup: (_, options, done) =>
               options.all
@@ -180,20 +181,47 @@ export class GatewayTransport {
 }
 
 export class GatewayProvider {
-  constructor(settings, transport = new GatewayTransport()) {
+  constructor(settings, transport = new GatewayTransport(), identity = {}) {
     Object.assign(this, { settings, transport });
+    this.serverCredential = identity.credential ?? process.env.GATEWAY_SERVER_CREDENTIAL ?? "";
+    const origin = identity.origin ?? (process.env.GATEWAY_SERVER_CREDENTIAL_URL || settings.officialURL);
+    this.credentialOrigin = origin ? gatewayURL(origin) : null;
   }
-  async call(path, device, credential) {
+  identityFor(config) {
+    return config.gatewayUrl === this.credentialOrigin ? this.serverCredential : "";
+  }
+  async registrationTicket(device) {
+    const config = await this.settings.current(), credential = this.identityFor(config);
+    if (!config.gatewayUrl || !credential) return { ticket: null, revision: config.revision };
+    let result;
+    try {
+      result = await this.transport.request(config.gatewayUrl, "/v1/server-tickets", {
+        credential, body: { appId: config.appId, serverId: config.serverId, deviceId: device.id },
+      });
+    } catch { throw Object.assign(Error("Gateway ticket temporarily unavailable"), { status: 503, retryAfter: 60 }); }
+    if (result.status !== 200) throw Object.assign(Error("Gateway server ticket rejected"), {
+      status: result.status === 429 ? 429 : result.status >= 500 ? 503 : 403,
+      retryAfter: /^\d+$/.test(String(result.retryAfter)) ? Math.max(1, Math.min(86400, Number(result.retryAfter))) : 60,
+    });
+    if (config.revision !== (await this.settings.current()).revision)
+      throw Object.assign(Error("Push gateway changed"), { status: 409 });
+    if (typeof result.body?.ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(result.body.ticket))
+      throw Object.assign(Error("Invalid gateway ticket response"), { status: 503, retryAfter: 60 });
+    return { ticket: result.body.ticket, expiresAt: result.body.expiresAt, revision: config.revision };
+  }
+  async call(path, device, credential, kind = "sync", encryptedNotification) {
     const config = await this.settings.current();
     if (!config.gatewayUrl) return { status: 0 };
     try {
       const result = await this.transport.request(config.gatewayUrl, path, {
         credential,
+        serverCredential: this.identityFor(config),
         body: {
           appId: config.appId,
           deviceId: device.id,
           serverId: config.serverId,
-          kind: "sync",
+          kind: kind === "new_mail" ? "encrypted_alert" : kind,
+          ...(encryptedNotification ? { encryptedNotification } : {}),
         },
       });
       return { status: result.status, reason: result.body?.reason, retryAfter: result.retryAfter };
@@ -201,11 +229,11 @@ export class GatewayProvider {
       return { status: 0 };
     }
   }
-  send(device, credential) {
-    return this.call("/v1/notify", device, credential);
+  send(device, credential, kind = "sync", encryptedNotification) {
+    return this.call("/v1/notify", device, credential, kind, encryptedNotification);
   }
-  validate(device, credential) {
-    return this.call("/v1/validate", device, credential);
+  validate(device, credential, kind = "sync") {
+    return this.call("/v1/validate", device, credential, kind);
   }
   async health() {
     try {

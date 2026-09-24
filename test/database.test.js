@@ -139,3 +139,21 @@ test("server restart keeps PostgreSQL records; losing the encryption key fails c
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test("mailbox monitoring defaults on and legacy migration runs only once", async () => {
+  const db = await createTestDatabase();
+  try {
+    await db.prepare("INSERT INTO users VALUES('monitor-user','monitor@example.test','unused','user',1)").run();
+    await db.prepare("INSERT INTO accounts(id,user_id,email,mode,imap_host,imap_port,smtp_host,smtp_port,credential) VALUES('monitor-account','monitor-user','mail@example.test','proxy','imap.example.test',993,'smtp.example.test',465,'unused')").run();
+    const enabled = async () => (await db.prepare("SELECT monitor_enabled FROM accounts WHERE id='monitor-account'").get()).monitor_enabled;
+    assert.equal(await enabled(), 1);
+    await db.prepare("UPDATE accounts SET monitor_enabled=0 WHERE id='monitor-account'").run();
+    await db.prepare("DELETE FROM schema_migrations WHERE name='default-mailbox-monitoring-v1'").run();
+    await db.initialize();
+    assert.equal(await enabled(), 1);
+    await db.prepare("UPDATE accounts SET monitor_enabled=0 WHERE id='monitor-account'").run();
+    await db.initialize();
+    assert.equal(await enabled(), 0);
+  } finally { await db.close(); }
+});

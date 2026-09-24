@@ -126,7 +126,8 @@ export async function createApp({
       leases,
       db,
       ...mailOptions,
-      onChange: async (id) => await devices.changed(id),
+      needsPreview: id => push.needsPreview(id),
+      onChange: async (id, kind, notification) => await devices.changed(id, kind, notification),
     });
     await mail.restore();
     reader = new MailReader(mail);
@@ -347,11 +348,14 @@ export async function createApp({
           return send(200, await devices.sync(device));
         if (path === "/api/client/ack" && req.method === "POST")
           return send(200, await devices.ack(device, body));
+        if (path === "/api/client/push/ticket" && req.method === "POST")
+          return send(200, await push.provider.registrationTicket(device));
         if (path === "/api/client/push/config" && req.method === "GET")
           return send(200, {
             ...(await push.settings.current()),
             pushStatus: await push.status(device),
             enabled: Boolean(device.push_enabled),
+            ...(await push.capabilities()),
           });
         if (path === "/api/client/push" && req.method === "POST") {
           await devices.push(device, body, user.session_id);

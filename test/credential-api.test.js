@@ -17,7 +17,7 @@ test("client encrypted API persists only envelope, enforces tenant/replay/downgr
   const id=randomUUID(),revision=randomUUID(),key=randomBytes(32),ciphertext=encrypt(key,id,revision);
   assert.equal((await call("/accounts","POST",{email:"old@example.test",mode:"proxy",imapHost:"imap.example.test",smtpHost:"smtp.example.test",credential:"rejected-password"},device.token)).status,409);
   const result=await call("/accounts","POST",{id,email:"mail@example.test",mode:"proxy",imapHost:"imap.example.test",smtpHost:"smtp.example.test",envelope:{revision,ciphertext}},device.token);assert.equal(result.status,201);
-  let a=await app.db.prepare("SELECT * FROM accounts WHERE id=?").get(id);assert.ok(a.credential.startsWith("client-v1:"));assert.ok(!a.credential.includes(key.toString("base64")));assert.throws(()=>app.mail.password(a));
+  let a=await app.db.prepare("SELECT * FROM accounts WHERE id=?").get(id);assert.equal(a.monitor_enabled,1);assert.ok(a.credential.startsWith("client-v1:"));assert.ok(!a.credential.includes(key.toString("base64")));assert.throws(()=>app.mail.password(a));
   const list=await call("/accounts","GET",null,device.token);assert.equal(list.body[0].credential,undefined);assert.equal(list.body[0].authorization.state,"locked");
   assert.equal((await call(`/accounts/${id}/credential`,"GET",null,stranger.token)).status,404);
   const challenge=(await call(`/accounts/${id}/credential`,"GET",null,device.token)).body.challenge;
