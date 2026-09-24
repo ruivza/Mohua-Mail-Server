@@ -14,7 +14,7 @@ const make = async (probe) => {
   await service.initialize();
   return { db, service };
 };
-test("health history is real, schedule validated, concurrent checks rejected", async () => {
+test("resource history and manual diagnostics reject concurrent checks", async () => {
   let finish, readyResolve;
   const ready = new Promise((resolve) => {
     readyResolve = resolve;
@@ -28,12 +28,8 @@ test("health history is real, schedule validated, concurrent checks rejected", a
   });
   try {
     assert.equal((await f.service.summary()).samples.length, 1);
-    assert.equal((await f.service.settings()).enabled, false);
-    await assert.rejects(
-      async () =>
-        await f.service.configure({ enabled: true, intervalMinutes: 1 }),
-    );
-    await f.service.configure({ enabled: true, intervalMinutes: 60 });
+    assert.equal((await f.service.summary()).settings, undefined);
+    assert.deepEqual(Object.keys((await f.service.summary()).samples[0]).sort(), ["at", "cpu", "memory"]);
     await f.service.run();
     await assert.rejects(async () => await f.service.run(), /already running/);
     await ready;
@@ -102,4 +98,17 @@ test("diagnostics distinguish local permissions without exposing upstream secret
       describeProbeError({ code: "UNKNOWN", message: "password secret" }),
     ).includes("secret"),
   );
+});
+
+test('legacy scheduled self-tests no longer send mail during resource sampling', async () => {
+  const db = await createTestDatabase();
+  let calls=0;
+  await db.exec("INSERT INTO service_settings VALUES('enabled','true'),('interval','15')");
+  const service = new HealthService({db,seal:x=>x,decrypt:x=>x,mail:{closed:false},intervalMs:5,probe:async()=>{calls++;}});
+  try {
+    await service.initialize();
+    await new Promise(r=>setTimeout(r,35));
+    assert.equal(calls,0);
+    assert.equal((await db.prepare('SELECT count(*) n FROM health_probe').get()).n,0);
+  } finally {await service.close();await db.close();}
 });

@@ -50,7 +50,6 @@ export class HealthService {
     this.probe = probe || this.externalProbe.bind(this);
     this.running = false;
     this.closed = false;
-    this.lastTick = Date.now();
     this.cpu = process.cpuUsage();
     this.cpuAt = performance.now();
   }
@@ -67,7 +66,6 @@ export class HealthService {
       if (this.tick || this.closed) return;
       this.tick = (async () => {
         await this.sample();
-        if (!this.closed) await this.scheduled();
       })()
         .catch(() => {})
         .finally(() => {
@@ -84,95 +82,31 @@ export class HealthService {
     )?.value;
   }
   async put(key, value) {
-    await this.db
-      .prepare(
-        "INSERT INTO service_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-      )
-      .run(key, value);
-  }
-  async settings() {
-    return {
-      enabled: (await this.get("enabled")) === "true",
-      intervalMinutes: Number((await this.get("interval")) || 60),
-      accountReady: !!(await this.get("ethereal")),
-    };
-  }
-  async configure(body) {
-    if (
-      typeof body.enabled !== "boolean" ||
-      ![15, 30, 60, 180, 360].includes(body.intervalMinutes)
-    )
-      throw Object.assign(new Error("Choose a valid interval"), {
-        status: 400,
-      });
-    await this.put("enabled", String(body.enabled));
-    await this.put("interval", String(body.intervalMinutes));
-    return await this.settings();
+    await this.db.prepare("INSERT INTO service_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
   }
   async sample() {
     if (this.closed) return;
-    const at = Date.now(),
-      start = performance.now();
-    let database = "ok";
-    try {
-      await this.db
-        .prepare(
-          "INSERT INTO health_probe VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",
-        )
-        .run(at);
-      if (
-        (
-          await this.db
-            .prepare("SELECT value FROM health_probe WHERE id=1")
-            .get()
-        ).value !== at
-      )
-        throw Error();
-    } catch {
-      database = "error";
-    }
+    const at = Date.now();
     const now = performance.now(),
       usage = process.cpuUsage(),
       elapsed = now - this.cpuAt;
     const cpu =
       elapsed > 0
-        ? Math.min(
-            100,
-            ((usage.user + usage.system - this.cpu.user - this.cpu.system) /
-              (elapsed * 1000)) *
-              100,
-          )
+        ? Math.max(0, ((usage.user + usage.system - this.cpu.user - this.cpu.system) / (elapsed * 1000)) * 100)
         : 0;
     this.cpu = usage;
     this.cpuAt = now;
-    const worker =
-      !this.mail.closed && at - this.lastTick < this.intervalMs * 2.5
-        ? "ok"
-        : "error";
-    this.lastTick = at;
     this.latest = {
       at,
-      api: "ok",
-      db: database,
-      worker,
-      latency: Math.round((performance.now() - start) * 100) / 100,
       memory: Math.round(process.memoryUsage().rss / 1048576),
       cpu: Math.round(cpu * 10) / 10,
     };
     try {
       await this.db
         .prepare(
-          "INSERT INTO service_samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(at) DO UPDATE SET api=excluded.api,db=excluded.db,worker=excluded.worker,latency=excluded.latency,memory=excluded.memory,cpu=excluded.cpu",
+          "INSERT INTO service_samples(at,memory,cpu) VALUES(?,?,?) ON CONFLICT(at) DO UPDATE SET memory=excluded.memory,cpu=excluded.cpu",
         )
-        .run(
-          at,
-          "ok",
-          database,
-          worker,
-          this.latest.latency,
-          this.latest.memory,
-          this.latest.cpu,
-        );
+        .run(at, this.latest.memory, this.latest.cpu);
       await this.db
         .prepare("DELETE FROM service_samples WHERE at<?")
         .run(at - 7 * 86400000);
@@ -180,30 +114,17 @@ export class HealthService {
         .prepare("DELETE FROM selftest_runs WHERE started<?")
         .run(at - 30 * 86400000);
     } catch {
-      this.latest.db = "error";
+      this.latest.recorded = false;
     }
-  }
-  async scheduled() {
-    const s = await this.settings();
-    if (!s.enabled || this.running) return;
-    const last = await this.db
-      .prepare(
-        "SELECT started FROM selftest_runs ORDER BY started DESC LIMIT 1",
-      )
-      .get();
-    if (!last || Date.now() - last.started >= s.intervalMinutes * 60000)
-      await this.run();
   }
   async summary() {
     return {
       now: Date.now(),
       uptimeSeconds: Math.round(process.uptime()),
       latest: this.latest,
-      settings: await this.settings(),
       running: this.running,
-      push: "not_configured",
       samples: await this.db
-        .prepare("SELECT * FROM service_samples WHERE at>? ORDER BY at")
+        .prepare("SELECT at,memory,cpu FROM service_samples WHERE at>? ORDER BY at")
         .all(Date.now() - 86400000),
       runs: await this.db
         .prepare("SELECT * FROM selftest_runs ORDER BY started DESC LIMIT 100")

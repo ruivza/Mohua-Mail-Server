@@ -1,3 +1,4 @@
+import { clientCredential, authorizeFixture } from "./helpers.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -83,7 +84,7 @@ test("mail API authenticates, updates secrets and closes workers on user disable
           mode: "direct",
           imapHost: "imap.example.com",
           smtpHost: "smtp.example.com",
-          credential: "old-secret",
+          ...clientCredential("old-secret"),
         },
         user.token,
       )
@@ -92,6 +93,7 @@ test("mail API authenticates, updates secrets and closes workers on user disable
       (await call(`/accounts/${id}/verify`, "POST", {}, admin.token)).status,
       403,
     );
+    await authorizeFixture(app, id, "old-secret");
     assert.equal(
       (await call(`/accounts/${id}/verify`, "POST", {}, user.token)).data
         .connectionStatus,
@@ -102,12 +104,13 @@ test("mail API authenticates, updates secrets and closes workers on user disable
         await call(
           `/accounts/${id}`,
           "PATCH",
-          { credential: "new-secret" },
+          clientCredential("new-secret", id),
           user.token,
         )
       ).status,
       200,
     );
+    await authorizeFixture(app, id, "new-secret");
     await call(`/accounts/${id}/verify`, "POST", {}, user.token);
     assert.deepEqual(passwords, ["old-secret", "new-secret"]);
     await call(
@@ -131,7 +134,7 @@ test("mail API authenticates, updates secrets and closes workers on user disable
       { active: true },
       admin.token,
     );
-    assert.equal(app.mail.jobs.size, 1);
+    assert.equal(app.mail.jobs.size, 0);
     const again = (
       await call("/client/login", "POST", {
         email: "user@example.com",

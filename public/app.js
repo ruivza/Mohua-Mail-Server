@@ -58,15 +58,15 @@ function lock() {
   $("push-result").textContent = "";
   document.body.classList.add("signed-out");
   $("auth-shell").hidden = false;
-  $("connection-state").textContent = t("等待登录");
-  $("connection-state").classList.remove("connected");
   route();
   $("dashboard").hidden = true;
   $("logout").hidden = true;
   for (const id of [
     "cards",
     "latest-run",
-    "status-bars",
+    "business-health",
+    "traffic-summary",
+    "recent-errors",
     "runs",
     "user-list",
     "devices",
@@ -114,7 +114,6 @@ function route() {
     else a.removeAttribute("aria-current");
     a.hidden = !!me && me.role !== "admin" && a.hash !== "#settings";
   });
-  $("schedule-section").hidden = me?.role !== "admin";
   $("push-section").hidden = me?.role !== "admin";
   $("page-title").textContent = {
     overview: t("服务概览"),
@@ -123,105 +122,153 @@ function route() {
     settings: t("设置与会话"),
   }[page];
   if (!me) $("page-title").textContent = t("欢迎来到 Mohua");
+  if (health && page === "overview") requestAnimationFrame(() => { chart("memory-chart", "memory"); chart("cpu-chart", "cpu"); });
 }
 window.addEventListener("hashchange", route);
-function bars(target) {
-  target.replaceChildren();
-  for (const [key, name] of [
-    ["api", t("API 进程心跳")],
-    ["db", t("数据库读写")],
-    ["worker", t("后台调度心跳")],
-    ["mail", t("外部邮件链路")],
-  ]) {
-    const wrap = document.createElement("div");
-    wrap.className = "service-bar";
-    const title = document.createElement("strong");
-    title.textContent = name;
-    wrap.append(title);
-    const bar = document.createElement("div");
-    bar.className = "uptime";
-    const width = 30 * 60000,
-      end = Math.ceil(health.now / width) * width;
-    for (let i = 0; i < 48; i++) {
-      const from = end - (48 - i) * width,
-        to = from + width;
-      const records = (key === "mail" ? health.runs : health.samples).filter(
-        (r) => (r.started ?? r.at) >= from && (r.started ?? r.at) < to,
-      );
-      let state = "unknown";
-      if (records.length) {
-        const states = records.map((r) => (key === "mail" ? r.status : r[key]));
-        state = states.includes("error")
-          ? "error"
-          : states.includes("external_error")
-            ? "external_error"
-            : states.includes("running")
-              ? "running"
-              : states.every((s) => s === "ok")
-                ? "ok"
-                : "unknown";
-      }
-      const cell = document.createElement("button");
-      cell.className = "cell " + state;
-      cell.title =
-        time(from) +
-        " — " +
-        time(to) +
-        " · " +
-        t(statusLabels[state]) +
-        " · " +
-        records.length +
-        t(" 次采样");
-      cell.setAttribute("aria-label", cell.title);
-      cell.onclick = () => message(cell.title);
-      bar.append(cell);
-    }
-    wrap.append(bar);
-    target.append(wrap);
-  }
-}
 function chart(id, field) {
   const target = $(id);
+  if (target.querySelector("svg") && target.dataset.language === language &&
+      (target.matches(":hover") || target.contains(document.activeElement))) return;
+  target.dataset.language = language;
   target.replaceChildren();
-  const points = health.samples;
-  if (!points.length) {
-    target.textContent = t("等待采样");
-    return;
-  }
-  const max = Math.max(1, ...points.map((p) => p[field]));
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 500 110");
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", field + t(" 最近24小时趋势，最高 ") + max);
-  let segment = [];
-  const draw = () => {
-    if (!segment.length) return;
-    const line = document.createElementNS(svg.namespaceURI, "polyline");
-    line.setAttribute("points", segment.join(" "));
-    line.setAttribute("fill", "none");
-    line.setAttribute("stroke", "#398767");
-    line.setAttribute("stroke-width", "2");
-    svg.append(line);
-    segment = [];
+  const start = health.now - 86400000;
+  const points = health.samples.filter(p => Number.isFinite(p[field]) && p[field] >= 0 && p.at >= start && p.at <= health.now).sort((a,b) => a.at-b.at);
+  if (!points.length) { target.textContent = t("等待采样"); return; }
+  const unit = field === "memory" ? "MB" : "%";
+  const peak = Math.max(...points.map(p => p[field]));
+  const rawStep = Math.max(peak, 1) / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const step = [1, 2, 2.5, 5, 10].find(n => n * magnitude >= rawStep) * magnitude;
+  const ceiling = step * 4;
+  const width = Math.max(280, target.clientWidth || 440), height = 220;
+  const left = 48, right = width - 14, top = 18, bottom = 174;
+  const x = at => left + (at - start) / 86400000 * (right-left);
+  const y = value => bottom - value / ceiling * (bottom-top);
+  const number = value => new Intl.NumberFormat(language, { maximumFractionDigits: 2 }).format(value);
+  const ns = "http://www.w3.org/2000/svg";
+  const el = (name, attrs = {}, text) => {
+    const node = document.createElementNS(ns, name);
+    for (const [key,value] of Object.entries(attrs)) node.setAttribute(key, value);
+    if (text !== undefined) node.textContent = text;
+    return node;
   };
-  points.forEach((p, i) => {
-    if (i && p.at - points[i - 1].at > 150000) draw();
-    const x = 5 + ((p.at - (health.now - 86400000)) / 86400000) * 490,
-      y = 100 - (p[field] / max) * 90;
-    segment.push(x + "," + y);
-    const dot = document.createElementNS(svg.namespaceURI, "circle");
-    dot.setAttribute("cx", x);
-    dot.setAttribute("cy", y);
-    dot.setAttribute("r", "2");
-    dot.setAttribute("fill", "#398767");
-    svg.append(dot);
+  const svg = el("svg", {viewBox:`0 0 ${width} ${height}`, role:"group", tabindex:0,
+    "aria-label": (field === "memory" ? t("内存") : "CPU") + " · " + unit + " · " + t("方向键查看采样详情"), class:"resource-chart"});
+  svg.append(el("text", {x:left-8,y:12,"text-anchor":"end",class:"axis-label"},unit));
+  for(let i=0;i<=4;i++) {
+    const value=step*i, yy=y(value);
+    svg.append(el("line",{x1:left,x2:right,y1:yy,y2:yy,class:"chart-grid"}));
+    svg.append(el("text",{x:left-8,y:yy+4,"text-anchor":"end",class:"axis-label"},number(value)));
+  }
+  for(let i=0;i<=4;i++) {
+    const at=start+i*86400000/4;
+    svg.append(el("text",{x:x(at),y:bottom+23,"text-anchor":i===0?"start":i===4?"end":"middle",class:"axis-label"},new Date(at).toLocaleTimeString(language,{hour:"2-digit",minute:"2-digit",hour12:false})));
+  }
+  let segment=[];
+  const draw=()=>{if(segment.length) svg.append(el("polyline",{points:segment.join(" "),class:"chart-line"}));segment=[];};
+  points.forEach((p,i)=>{
+    if(i && p.at-points[i-1].at>150000) draw();
+    segment.push(`${x(p.at)},${y(p[field])}`);
+  });draw();
+  // Isolated samples remain visible without inventing data across gaps.
+  points.forEach((p,i)=>{if((!i || p.at-points[i-1].at>150000) && (i===points.length-1 || points[i+1].at-p.at>150000)) svg.append(el("circle",{cx:x(p.at),cy:y(p[field]),r:2.5,class:"chart-dot"}));});
+  const cursor=el("line",{y1:top,y2:bottom,class:"chart-cursor",visibility:"hidden"});
+  const dot=el("circle",{r:4,class:"chart-dot",visibility:"hidden"});
+  svg.append(cursor,dot);
+  const tooltip=document.createElement("div"); tooltip.className="chart-tooltip";tooltip.hidden=true;
+  const details=document.createElement("p");details.className="chart-summary";
+  details.textContent=t("当前 ")+number(points.at(-1)[field])+" "+unit+t(" · 最高 ")+number(peak)+" "+unit+t(" · 空缺表示无数据");
+  const announcement=document.createElement("span");announcement.className="visually-hidden";announcement.setAttribute("aria-live","polite");
+  target.classList.add("chart-container");target.append(svg,tooltip,details,announcement);
+  let index=points.length-1;
+  const hide=()=>{tooltip.hidden=true;cursor.setAttribute("visibility","hidden");dot.setAttribute("visibility","hidden");};
+  const show=(i,keyboard=false)=>{
+    index=i;const p=points[i];
+    const label=time(p.at)+" · "+number(p[field])+" "+unit;
+    tooltip.textContent=label;tooltip.hidden=false;
+    cursor.setAttribute("x1",x(p.at));cursor.setAttribute("x2",x(p.at));cursor.setAttribute("visibility","visible");
+    dot.setAttribute("cx",x(p.at));dot.setAttribute("cy",y(p[field]));dot.setAttribute("visibility","visible");
+    const rect=svg.getBoundingClientRect();
+    tooltip.style.left=Math.max(0,Math.min(rect.width-tooltip.offsetWidth,x(p.at)/width*rect.width-tooltip.offsetWidth/2))+"px";
+    tooltip.style.top=Math.max(0,y(p[field])/height*rect.height-tooltip.offsetHeight-10)+"px";
+    if(keyboard) announcement.textContent=label;
+  };
+  const inspect=event=>{
+    const position=svg.createSVGPoint();position.x=event.clientX;position.y=event.clientY;
+    const matrix=svg.getScreenCTM();if(!matrix)return;
+    const local=position.matrixTransform(matrix.inverse());
+    if(local.x<left || local.x>right || local.y<top || local.y>bottom){hide();return;}
+    const at=start+(local.x-left)/(right-left)*86400000;
+    let closest=0;
+    for(let i=1;i<points.length;i++)if(Math.abs(points[i].at-at)<Math.abs(points[closest].at-at))closest=i;
+    // Snap within a few pixels; blank historical periods never imply a sample.
+    if(Math.abs(x(points[closest].at)-local.x)>8){hide();return;}
+    show(closest);
+  };
+  svg.addEventListener("pointermove",inspect);svg.addEventListener("pointerdown",inspect);
+  svg.addEventListener("pointerleave",()=>{if(document.activeElement!==svg)hide();});
+  svg.addEventListener("focus",()=>show(index,true));svg.addEventListener("blur",hide);
+  svg.addEventListener("keydown",event=>{
+    if(event.key==="Escape"){hide();return;}
+    if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
+    event.preventDefault();show(event.key==="Home"?0:event.key==="End"?points.length-1:Math.max(0,Math.min(points.length-1,index+(event.key==="ArrowLeft"?-1:1))),true);
   });
-  draw();
-  target.append(svg);
-  const p = document.createElement("p");
-  p.textContent =
-    t("当前 ") + points.at(-1)[field] + t(" · 最高 ") + max + t(" · 空缺表示无数据");
-  target.append(p);
+}
+function renderOperations() {
+  const { listeners: l, outgoing: o, notification: n } = health.business;
+  const target = $("business-health");
+  target.replaceChildren();
+  const panels = [
+    ["邮箱监听", "仅统计已启用监听的活跃账号；持续异常指超过五分钟未连接。", [
+      ["应监听", l.expected], ["已连接", l.connected], ["连接中", l.connecting], ["重连中", l.reconnecting], ["未运行", l.missing], ["持续异常", l.prolonged]]],
+    ["发信结果", "最近24小时创建的发送任务；副本异常可能与部分发送重叠。", [
+      ["发送失败", o.failed], ["结果未知", o.unknown], ["部分发送", o.partial], ["发送中", o.sending], ["已发送副本异常", o.copy_issues]]],
+    ["通知队列", n.enabled ? "仅监控提交网关；正常限流和退避不算超期。" : "推送未启用或未配置", [
+      ["待处理", n.pending], ["重试中", n.retrying], ["已到期未处理", n.overdue], ["最长超期（秒）", n.overdueSeconds], ["异常设备", n.failedDevices]]],
+  ];
+  for (const [panelIndex, [title, note, values]] of panels.entries()) {
+    const panel = document.createElement("section"), heading = document.createElement("h2"), help = document.createElement("p");
+    heading.textContent = t(title); help.textContent = t(note);
+    const content = document.createElement("div"); content.className = "operation-content";
+    panel.append(heading, help, content);
+    if (panelIndex === 0) {
+      const headline = document.createElement("div"); headline.className = "operation-headline";
+      headline.textContent = l.expected ? `${l.connected} / ${l.expected}` : t("未启用监听");
+      content.append(headline);
+      if (l.expected) {
+        const caption=document.createElement("p");caption.textContent=t("已连接 / 应监听");content.append(caption);
+        const bar=document.createElement("div");bar.className="listener-bar";bar.setAttribute("role","img");
+        bar.setAttribute("aria-label", values.slice(1,5).map(([label,count])=>t(label)+": "+count).join(", "));
+        for(const [key,label] of [["connected","已连接"],["connecting","连接中"],["reconnecting","重连中"],["missing","未运行"]]) {
+          if(!l[key])continue;
+          const part=document.createElement("span");part.className=key;part.style.flexGrow=l[key];part.title=t(label)+": "+l[key];bar.append(part);
+        }
+        content.append(bar);
+      }
+    }
+    if (panelIndex === 2) {
+      const headline=document.createElement("div");headline.className="operation-headline queue-headline";
+      headline.textContent=!n.enabled?t("推送未启用或未配置"):n.failedDevices||n.overdueSeconds>=60?t("需要处理"):t("队列正常");
+      if(n.enabled&&(n.failedDevices||n.overdueSeconds>=60))headline.classList.add("metric-issue");
+      content.append(headline);
+      values.sort((a,b)=>["最长超期（秒）","异常设备","待处理","重试中","已到期未处理"].indexOf(a[0])-["最长超期（秒）","异常设备","待处理","重试中","已到期未处理"].indexOf(b[0]));
+    }
+    for (const [label, count] of values) {
+      if(panelIndex===0 && (["应监听","已连接"].includes(label)||!l.expected))continue;
+      if(panelIndex===2 && (!n.enabled || (!count && !n.pending && !n.failedDevices)))continue;
+      row(content, t(label), String(count));
+      const issue = ["未运行", "持续异常", "发送失败", "结果未知", "部分发送", "已发送副本异常", "异常设备"].includes(label)
+        || (["已到期未处理", "最长超期（秒）"].includes(label) && n.overdueSeconds >= 60);
+      if (issue && count > 0) content.lastElementChild.classList.add("metric-issue");
+    }
+    target.append(panel);
+  }
+  const traffic = health.traffic;
+  $("traffic-summary").replaceChildren();
+  for (const [label, value] of [["请求数", traffic.requests], ["服务端错误", traffic.errors], ["连接中断", traffic.aborted], ["平均耗时（毫秒）", traffic.averageMs ?? "—"]]) row($("traffic-summary"), t(label), String(value));
+  const recent = $("recent-errors"); recent.replaceChildren();
+  if (!traffic.recent.length) { const empty = document.createElement("p"); empty.textContent = t("暂无接口异常"); recent.append(empty); }
+  for (const error of traffic.recent) row(recent, `${error.method} · ${error.operation} · ${error.status ?? "—"}`, `${time(error.at)} · ${error.code}`);
 }
 function renderHealth() {
   const latest = health.latest;
@@ -243,7 +290,7 @@ function renderHealth() {
       Math.floor(health.uptimeSeconds / 60) + t(" 分钟"),
       t("当前进程 · Server v0.8.0"),
     ],
-    [t("进程资源"), latest.memory + " MB", "CPU " + latest.cpu + "%"],
+    [t("监听连接"), health.business.listeners.expected ? health.business.listeners.connected + " / " + health.business.listeners.expected : t("未启用监听"), t("已连接 / 应监听")],
   ]) {
     const card = document.createElement("section");
     const s = document.createElement("small");
@@ -255,7 +302,7 @@ function renderHealth() {
     card.append(s, h, p);
     $("cards").append(card);
   }
-  bars($("status-bars"));
+  renderOperations();
   chart("memory-chart", "memory");
   chart("cpu-chart", "cpu");
   const last = health.runs[0];
@@ -267,7 +314,7 @@ function renderHealth() {
       time(last.started)
     : t("尚未运行自检，首次点击会创建独立测试账号。");
   $("runs").replaceChildren();
-  if (!health.runs.length) $("runs").textContent = t("尚无自检记录");
+  $("runs").hidden = !health.runs.length;
   for (const r of health.runs)
     row(
       $("runs"),
@@ -282,9 +329,7 @@ function renderHealth() {
     b.disabled = health.running;
     b.textContent = health.running ? t("自检进行中…") : t("立即自检");
   });
-  $("account-status").textContent = health.settings.accountReady
-    ? t("独立测试账号已加密保存")
-    : t("尚未创建测试账号");
+
 }
 async function refreshHealth() {
   if (me?.role !== "admin" || busy) return;
@@ -357,8 +402,6 @@ async function enter() {
   me = await api("/me");
   document.body.classList.remove("signed-out");
   $("auth-shell").hidden = true;
-  $("connection-state").textContent = t("已登录");
-  $("connection-state").classList.add("connected");
   $("dashboard").hidden = false;
   $("logout").hidden = false;
   route();
@@ -367,10 +410,7 @@ async function enter() {
     await refreshUsers();
     await refreshHealth();
     renderPush(await api("/admin/push"));
-    $("schedule").elements.enabled.checked = health.settings.enabled;
-    $("schedule").elements.intervalMinutes.value = String(
-      health.settings.intervalMinutes,
-    );
+
     clearInterval(poll);
     poll = setInterval(
       () => refreshHealth().catch((e) => message(t("状态更新失败：") + e.message)),
@@ -437,20 +477,6 @@ document.querySelectorAll(".run-test").forEach(
       }
     }),
 );
-$("schedule").onsubmit = async (e) => {
-  e.preventDefault();
-  try {
-    await api("/admin/health/settings", "PATCH", {
-      enabled: e.target.elements.enabled.checked,
-      intervalMinutes: Number(e.target.elements.intervalMinutes.value),
-    });
-    message(t("自检计划已保存。"));
-    await refreshHealth();
-  } catch (err) {
-    message(err.message);
-  }
-};
-
 let pushConfig;
 function renderPush(value) {
   pushConfig = value;
@@ -510,24 +536,71 @@ $("test-gateway").onclick = async (event) => {
 
 function applyLanguage() {
   document.documentElement.lang = language;
-  document.title = "Mohua · " + t("服务控制台");
+  document.title = "Mohua Mail";
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-label]").forEach(el => { el.setAttribute("aria-label", t(el.dataset.i18nLabel)); });
-  $("language").value = language;
-  $("connection-state").textContent = t(me ? "已登录" : "等待登录");
+  syncPreferenceMenus();
   if (invitationCode) $("invitation").textContent = t("一次性邀请码（24 小时有效）：") + invitationCode;
   route();
   if (health) renderHealth();
   if (me) { renderSessions(); if (me.role === "admin") renderUsers(); }
   pushModeChanged();
 }
-$("language").onchange = event => {
-  language = event.target.value;
-  savePreference("language", language);
-  message("");
-  $("push-result").textContent = "";
-  applyLanguage();
-};
-$("theme").value = theme;
-$("theme").onchange = event => { theme = event.target.value; savePreference("theme", theme); applyTheme(); };
+function syncPreferenceMenus() {
+  for (const kind of ["theme", "language"]) {
+    document.querySelectorAll(`[data-${kind}-option]`).forEach(button => {
+      button.setAttribute("aria-checked", String(button.dataset[kind + "Option"] === (kind === "theme" ? theme : language)));
+    });
+  }
+  document.querySelectorAll("[data-theme-icon]").forEach(icon => { icon.hidden = icon.dataset.themeIcon !== theme; });
+}
+function closePreferenceMenus() {
+  for (const kind of ["theme", "language"]) {
+    $(kind + "-menu").hidden = true;
+    $(kind).setAttribute("aria-expanded", "false");
+  }
+}
+for (const kind of ["theme", "language"]) {
+  const trigger = $(kind), menu = $(kind + "-menu");
+  function openMenu(last = false) {
+    closePreferenceMenus();
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    const items = menu.querySelectorAll("button");
+    (last ? items[items.length - 1] : menu.querySelector('[aria-checked="true"]') || items[0]).focus();
+  }
+  trigger.onclick = () => { if (menu.hidden) openMenu(); else closePreferenceMenus(); };
+  trigger.onkeydown = event => {
+    if (["ArrowDown", "ArrowUp"].includes(event.key)) { event.preventDefault(); openMenu(event.key === "ArrowUp"); }
+  };
+  menu.onclick = event => {
+    const option = event.target.closest(`[data-${kind}-option]`);
+    if (!option) return;
+    const value = option.dataset[kind + "Option"];
+    if (kind === "theme") { theme = value; savePreference(kind, value); applyTheme(); }
+    else {
+      language = value; savePreference(kind, value);
+      message(""); $("push-result").textContent = ""; applyLanguage();
+    }
+    syncPreferenceMenus(); closePreferenceMenus(); trigger.focus();
+  };
+  menu.onkeydown = event => {
+    const items = [...menu.querySelectorAll("button")];
+    const index = items.indexOf(document.activeElement);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      items[event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+    }
+  };
+}
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  const kind = ["theme", "language"].find(kind => !$(kind + "-menu").hidden);
+  if (kind) { closePreferenceMenus(); $(kind).focus(); }
+});
+document.addEventListener("click", event => { if (!event.target.closest(".preference-picker")) closePreferenceMenus(); });
+document.addEventListener("focusin", event => { if (!event.target.closest(".preference-picker")) closePreferenceMenus(); });
 applyLanguage();
+
+let chartResize;
+window.addEventListener("resize", () => { clearTimeout(chartResize); chartResize = setTimeout(() => { if (health) { chart("memory-chart", "memory"); chart("cpu-chart", "cpu"); } }, 120); });

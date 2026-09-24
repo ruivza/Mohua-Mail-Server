@@ -2,6 +2,8 @@
 import { passwordHash, hashToken } from "../src/auth.js";
 import {
   cleanupTestDatabases,
+  clientCredential,
+  authorizeFixture,
   createTestApp as createApp,
 } from "./helpers.mjs";
 import { Readable } from "node:stream";
@@ -260,15 +262,6 @@ const app = await createApp({
     }),
   },
 });
-const key = readFileSync(join(dir, "master.key"));
-const iv = randomBytes(12),
-  cipher = createCipheriv("aes-256-gcm", key, iv);
-const credential = Buffer.concat([
-  iv,
-  cipher.update("fixture-only"),
-  cipher.final(),
-  cipher.getAuthTag(),
-]).toString("base64");
 await app.db
   .prepare("INSERT INTO users VALUES(?,?,?,?,?)")
   .run(
@@ -295,8 +288,9 @@ for (const [id, mode] of [
       993,
       "smtp.example.com",
       465,
-      credential,
+      "client-v1:" + JSON.stringify(clientCredential("fixture-only", id).envelope),
     );
+  await authorizeFixture(app, id);
 }
 const handler = app.server.listeners("request")[0];
 app.server.removeListener("request", handler);
@@ -380,6 +374,7 @@ app.server.on("request", async (req, res) => {
           FROM accounts WHERE id='fixture-proxy' ON CONFLICT(id) DO NOTHING`,
           )
           .run();
+        await authorizeFixture(app, "fixture-second");
         break;
       case "/__test/offline":
         offline = true;

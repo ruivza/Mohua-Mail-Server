@@ -21,6 +21,7 @@ export class ImapPool {
 
   async acquire(account, job) {
     if (this.closed || job.cancelled) throw Error("Cancelled");
+    this.mail.leases?.assert(account);
     const key = this.key(account);
     const index = this.idle.findIndex(
       (entry) => entry.key === key && !entry.closed,

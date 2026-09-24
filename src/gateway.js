@@ -161,7 +161,7 @@ export class GatewayTransport {
                 return;
               }
               // No redirects: never send a delivery credential to another origin.
-              resolve({ status: response.statusCode, body: payload });
+              resolve({ status: response.statusCode, body: payload, retryAfter: response.headers["retry-after"] });
             });
           },
         );
@@ -196,7 +196,7 @@ export class GatewayProvider {
           kind: "sync",
         },
       });
-      return { status: result.status, reason: result.body?.reason };
+      return { status: result.status, reason: result.body?.reason, retryAfter: result.retryAfter };
     } catch {
       return { status: 0 };
     }

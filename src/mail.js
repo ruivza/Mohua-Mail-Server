@@ -27,7 +27,7 @@ export async function publicAddress(host, resolver = lookup) {
 export class MailService {
   constructor({
     db,
-    decrypt,
+    leases,
     resolveHost = publicAddress,
     imapFactory = (options) => new ImapFlow(options),
     smtpFactory = (options) => nodemailer.createTransport(options),
@@ -37,7 +37,7 @@ export class MailService {
   }) {
     Object.assign(this, {
       db,
-      decrypt,
+      leases,
       resolveHost,
       imapFactory,
       smtpFactory,
@@ -45,6 +45,19 @@ export class MailService {
       retryMs,
       onChange,
     });
+    // Drop known library references when transports close. This is not secure
+    // erasure of JS strings or protection against a compromised runtime.
+    this.smtpFactory = options => {
+      const transport = smtpFactory(options), close = transport.close.bind(transport);
+      transport.close = (...args) => {
+        try { return close(...args); } finally {
+          if (options.auth) options.auth.pass = "";
+          if (transport.transporter?.options?.auth) transport.transporter.options.auth.pass = "";
+          if (transport.transporter?.auth?.credentials) transport.transporter.auth.credentials.pass = "";
+        }
+      };
+      return transport;
+    };
     this.background = new Set();
     this.jobs = new Map();
     this.states = new Map();
@@ -62,6 +75,7 @@ export class MailService {
     this.states.set(id, {
       ...this.state(id),
       connectionStatus,
+      disconnectedSince: connectionStatus === "listening" || connectionStatus === "stopped" ? null : this.state(id).disconnectedSince || Date.now(),
       ...extra,
       pushStatus: "not_configured",
     });
@@ -73,17 +87,21 @@ export class MailService {
       )
       .get(id);
   }
+  password(account) {
+    return this.leases.password(account);
+  }
   async imap(account, job) {
     if (account.imap_port !== 993)
       throw new Error("IMAP TLS requires port 993");
     const address = await this.resolveHost(account.imap_host);
     if (job.cancelled) throw new Error("Cancelled");
+    const auth = { user: account.email, pass: this.password(account) };
     const client = this.imapFactory({
       host: address,
       servername: account.imap_host,
       port: 993,
       secure: true,
-      auth: { user: account.email, pass: this.decrypt(account.credential) },
+      auth,
       logger: false,
       connectionTimeout: 10000,
       greetingTimeout: 10000,
@@ -91,6 +109,9 @@ export class MailService {
       maxIdleTime: 120000,
       tls: { rejectUnauthorized: true, minVersion: "TLSv1.2" },
     });
+    const connect = client.connect.bind(client), close = client.close.bind(client);
+    client.connect = async (...args) => { try { return await connect(...args); } finally { auth.pass = ""; } };
+    client.close = (...args) => { try { return close(...args); } finally { auth.pass = ""; } };
     job.client = client;
     client.on("error", () => {
       if (!job.cancelled) client.close();
@@ -116,6 +137,7 @@ export class MailService {
     }
   }
   async verify(account) {
+    this.leases?.assert(account);
     if (this.jobs.has(account.id))
       throw Object.assign(new Error("Stop monitoring before testing"), {
         status: 409,
@@ -138,7 +160,7 @@ export class MailService {
           port: account.smtp_port,
           secure: account.smtp_port === 465,
           requireTLS: true,
-          auth: { user: account.email, pass: this.decrypt(account.credential) },
+          auth: { user: account.email, pass: this.password(account) },
           tls: {
             servername: account.smtp_host,
             rejectUnauthorized: true,
@@ -180,6 +202,7 @@ export class MailService {
   }
   async start(account) {
     if (this.closed || this.jobs.has(account.id)) return;
+    try { this.leases?.assert(account); } catch { this.status(account.id, "authorization_required"); return; }
     const job = { cancelled: false };
     this.jobs.set(account.id, job);
     this.status(account.id, "connecting", { error: null });
@@ -189,18 +212,24 @@ export class MailService {
       job.cancelled = true;
       job.client?.close();
       this.status(account.id, "reconnecting");
-      job.timer = setTimeout(
-        () =>
-          this.track(async () => {
-            if (this.jobs.get(account.id) !== job || this.closed) return;
-            const current = await this.active(account.id);
-            if (this.jobs.get(account.id) !== job || this.closed) return;
-            this.jobs.delete(account.id);
-            if (current?.monitor_enabled) await this.start(current);
-          }),
-        this.retryMs,
-      );
-      job.timer.unref();
+      const scheduleRetry = () => {
+        job.timer = setTimeout(() => this.track(async () => {
+          if (this.jobs.get(account.id) !== job || this.closed) return;
+          let current;
+          try { current = await this.active(account.id); }
+          catch {
+            // Database outages must not permanently strand a cancelled watcher.
+            if (this.jobs.get(account.id) === job && !this.closed) scheduleRetry();
+            return;
+          }
+          if (this.jobs.get(account.id) !== job || this.closed) return;
+          this.jobs.delete(account.id);
+          if (current?.monitor_enabled) await this.start(current);
+          else this.status(account.id, "stopped");
+        }), this.retryMs);
+        job.timer.unref();
+      };
+      scheduleRetry();
     };
     try {
       await this.deadline(job, async () => {
@@ -224,6 +253,7 @@ export class MailService {
         const box = await client.mailboxOpen("INBOX", { readOnly: true });
         if (job.cancelled) throw new Error("Cancelled");
         await this.onChange(account.id);
+        if (job.cancelled || this.closed || this.jobs.get(account.id) !== job) return;
         this.status(account.id, "listening", {
           messageCount: box.exists,
           uidValidity: String(box.uidValidity),
@@ -231,7 +261,7 @@ export class MailService {
         });
       });
     } catch {
-      if (this.jobs.get(account.id) === job && !this.closed) {
+      if (this.jobs.get(account.id) === job && !this.closed && !job.timer) {
         job.cancelled = false;
         retry();
       }

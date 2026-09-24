@@ -128,7 +128,7 @@ export class DeviceService {
 
   async revoke(user, id) {
     await this.own(user, id);
-    return await this.db.transaction(async () => {
+    const result = await this.db.transaction(async () => {
       await this.db
         .prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE")
         .get(id);
@@ -147,6 +147,8 @@ export class DeviceService {
         )
         .run(Date.now(), id);
     });
+    this.onRevoke?.(id);
+    return result;
   }
 
   // Mailbox ownership is user-wide. device_mailboxes stores sync progress, not permissions.

@@ -1,5 +1,13 @@
 import { GatewaySettings, GatewayProvider } from "./gateway.js";
 
+// Honor bounded Retry-After values without accepting negative, infinite or invalid delays.
+export function retryAfterMs(value, now = Date.now()) {
+  if (typeof value !== 'string' && typeof value !== 'number') return 0;
+  const text = String(value).trim();
+  const delay = /^\d+$/.test(text) ? Number(text) * 1000 : /^[A-Za-z]{3},/.test(text) ? Date.parse(text) - now : 0;
+  return Number.isFinite(delay) ? Math.max(0, Math.min(86400000, delay)) : 0;
+}
+
 // One durable, coalesced hint per device. It contains no mailbox content and grants no access.
 export class PushService {
   constructor({
@@ -12,8 +20,9 @@ export class PushService {
     intervalMs = 20 * 60000,
     coalesceMs = 5000,
     autoStart = true,
+    random = Math.random,
   }) {
-    Object.assign(this, { db, decrypt, now, intervalMs, coalesceMs });
+    Object.assign(this, { db, decrypt, now, intervalMs, coalesceMs, random });
     this.settings = new GatewaySettings(db, officialURL);
     this.provider = provider ?? new GatewayProvider(this.settings, transport);
     this.autoStart = autoStart;
@@ -52,7 +61,8 @@ export class PushService {
     const result = await this.provider.validate(device, input.credential);
     if (result.status !== 200)
       throw Object.assign(Error("Gateway credential rejected"), {
-        status: result.status === 0 ? 502 : 400,
+        status: result.status === 429 ? 429 : result.status >= 500 || result.status === 0 ? 503 : 400,
+        retryAfter: Math.ceil(Math.max(60000, retryAfterMs(result.retryAfter, this.now())) / 1000),
       });
     if (input.revision !== (await this.settings.current()).revision)
       throw Object.assign(Error("Push gateway changed"), { status: 409 });
@@ -224,10 +234,10 @@ export class PushService {
           invalid;
         const attempts = job.attempts + 1;
         const exhausted = attempts >= 8;
-        const delay =
-          !retry || exhausted
-            ? 3600000
-            : Math.min(3600000, 60000 * 2 ** (attempts - 1));
+        const delay = Math.max(
+          !retry || exhausted ? 3600000 : Math.min(3600000, 60000 * 2 ** (attempts - 1)),
+          retryAfterMs(result.retryAfter, this.now()),
+        ) + Math.floor(this.random() * 5000);
         await this.db
           .prepare(
             "UPDATE client_devices SET push_error=?,push_not_before=? WHERE id=?",

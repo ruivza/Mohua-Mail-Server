@@ -1,3 +1,4 @@
+import { clientCredential, authorizeFixture } from "./helpers.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -43,7 +44,8 @@ test("sync route isolates tenants and rechecks revocation after upstream reads",
     .prepare(
       "INSERT INTO accounts(id,user_id,email,mode,credential,imap_host,imap_port,smtp_host,smtp_port) VALUES(?,?,?,?,?,'imap.example.com',993,'smtp.example.com',465)",
     )
-    .run("mailbox", "one", "mail@example.com", "proxy", "fixture");
+    .run("mailbox", "one", "mail@example.com", "proxy", "client-v1:" + JSON.stringify(clientCredential("fixture-only", "mailbox").envelope));
+  await authorizeFixture(app, "mailbox");
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const call = async (path, body, token) =>

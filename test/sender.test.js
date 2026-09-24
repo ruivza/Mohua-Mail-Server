@@ -44,6 +44,7 @@ async function fixture() {
   const mail = {
     resolveHost: async () => "1.1.1.1",
     decrypt: () => "secret",
+    password: () => "secret",
     imap: async (a, j) => {
       j.client = client;
       return client;

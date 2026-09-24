@@ -20,3 +20,5 @@ CREATE INDEX IF NOT EXISTS devices_user ON client_devices(user_id);
 CREATE INDEX IF NOT EXISTS accounts_user ON accounts(user_id);
 CREATE INDEX IF NOT EXISTS push_due ON push_jobs(next_at);
 CREATE TABLE IF NOT EXISTS encryption_check(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
+
+CREATE INDEX IF NOT EXISTS outbox_created ON outbox(created);

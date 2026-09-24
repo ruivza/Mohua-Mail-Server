@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestDatabase } from "./helpers.mjs";
 import { DeviceService } from "../src/devices.js";
-import { PushService } from "../src/push.js";
+import { PushService, retryAfterMs } from "../src/push.js";
 
 async function fixture(send = async () => ({ status: 200 })) {
   const db = await createTestDatabase();
@@ -20,6 +20,7 @@ async function fixture(send = async () => ({ status: 200 })) {
     officialURL: "https://push.example.test",
     now: () => now,
     autoStart: false,
+    random: () => 0,
     coalesceMs: 0,
     intervalMs: 1200000,
   };
@@ -87,7 +88,7 @@ test("durable queue coalesces changes, survives restart, retries and preserves i
     await f.restart();
     await f.push.flush();
     assert.equal(count, 1);
-    f.advance(60000);
+    f.advance(65000);
     await f.push.flush();
     assert.equal(count, 2);
     assert.equal(
@@ -209,4 +210,36 @@ test("disabling while gateway validation is running prevents late enrollment", a
   } finally {
     await f.close();
   }
+});
+
+
+test("gateway Retry-After survives restart and blocks early delivery", async () => {
+  let sends = 0;
+  const f = await fixture(async () => { sends++; return sends === 1 ? { status: 429, retryAfter: '7200' } : { status: 200 }; });
+  try {
+    const device = await f.enroll('one'); await f.register(device); await f.push.flush();
+    assert.equal(sends, 1); await f.restart();
+    f.advance(7199000); await f.push.flush(); assert.equal(sends, 1);
+    f.advance(1000); await f.push.flush(); assert.equal(sends, 2);
+  } finally { await f.close(); }
+});
+
+test("temporary validation errors preserve credentials and expose cooldown to the client", async () => {
+  const f = await fixture();
+  try {
+    const device = await f.enroll('one'); await f.register(device);
+    f.options.provider.validate = async () => ({ status: 429, retryAfter: '7200' });
+    await assert.rejects(f.register(device), error => error.status === 429 && error.retryAfter === 7200);
+    assert.equal((await f.devices.own('one', device.id)).push_credential, 'encrypted:' + 'a'.repeat(43));
+    f.options.provider.validate = async () => ({ status: 503, retryAfter: '120' });
+    await assert.rejects(f.register(device), error => error.status === 503 && error.retryAfter === 120);
+  } finally { await f.close(); }
+});
+
+test("Retry-After parsing rejects malformed delays and caps remote values", () => {
+  const now = Date.parse('2026-09-24T00:00:00Z');
+  assert.equal(retryAfterMs('120', now), 120000);
+  assert.equal(retryAfterMs('Thu, 24 Sep 2026 00:02:00 GMT', now), 120000);
+  for (const value of ['-1', 'NaN', 'Infinity', 'garbage', undefined]) assert.equal(retryAfterMs(value, now), 0);
+  assert.equal(retryAfterMs('9999999999', now), 86400000);
 });

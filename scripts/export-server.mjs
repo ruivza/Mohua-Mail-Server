@@ -7,12 +7,16 @@ const target = resolve(root, "dist/mohua-server");
 const files = [
   "src",
   "public",
+  "ops/mail-edge.conf",
   "package.json",
   "package-lock.json",
   "Dockerfile",
   "compose.yaml",
+  "compose.image.yaml",
+  ".github/workflows/docker.yml",
   "compose.test.yaml",
   "scripts/configure.mjs",
+  "scripts/remove-legacy-mailboxes.mjs",
   "test/helpers.mjs",
   "start.ps1",
   ".env.example",
@@ -22,6 +26,8 @@ const files = [
   "GATEWAY_PROTOCOL.md",
   "scripts/export-server.mjs",
   "docs/SERVER_README.md",
+  "docs/CLIENT_CREDENTIAL_LEASES.md",
+  "docs/MAIL_PROCESS_ISOLATION.md",
   ...readdirSync(resolve(root, "test"))
     .filter((name) => name.endsWith(".test.js"))
     .map((name) => "test/" + name),

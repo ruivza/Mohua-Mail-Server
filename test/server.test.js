@@ -1,3 +1,4 @@
+import { clientCredential, authorizeFixture } from "./helpers.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
@@ -102,8 +103,11 @@ test("tenant isolation, invite reuse, encrypted credentials and session revocati
     );
     const health = (await call("/admin/health", "GET", undefined, admin.token))
       .data;
+    assert.equal((await call("/admin/health/settings", "PATCH", { enabled: true, intervalMinutes: 60 }, admin.token)).status, 404);
     assert.equal(health.samples.length, 1);
-    assert.equal(health.settings.enabled, false);
+    assert.equal(health.settings, undefined);
+    assert.equal(health.business.listeners.expected, 0);
+    assert.equal(typeof health.traffic.requests, "number");
     assert.ok(!JSON.stringify(health).includes("credential"));
     const account = (
       await call(
@@ -114,7 +118,7 @@ test("tenant isolation, invite reuse, encrypted credentials and session revocati
           mode: "proxy",
           imapHost: "imap.example.com",
           smtpHost: "smtp.example.com",
-          credential: "mail-secret-unique",
+          ...clientCredential("mail-secret-unique"),
         },
         user.token,
       )
@@ -176,6 +180,35 @@ test("tenant isolation, invite reuse, encrypted credentials and session revocati
       401,
     );
   } finally {
+    await app.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("public readiness probe reports database failure without leaking details and recovers", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mohua-readiness-"));
+  const app = await createApp({ dataDir: dir, setupToken: "setup-secret" });
+  const query = app.db.query;
+  await new Promise(resolve => app.server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  try {
+    let response = await fetch(base + "/healthz");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await response.json(), { status: "ok" });
+    app.db.query = async () => { throw Error("private database credentials"); };
+    response = await fetch(base + "/healthz");
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { status: "unavailable" });
+    app.db.query = query;
+    response = await fetch(base + "/healthz");
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: "ok" });
+    response = await fetch(base + "/health");
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Not found" });
+  } finally {
+    app.db.query = query;
     await app.close();
     rmSync(dir, { recursive: true, force: true });
   }

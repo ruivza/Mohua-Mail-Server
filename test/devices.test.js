@@ -1,3 +1,4 @@
+import { clientCredential } from "./helpers.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -130,7 +131,7 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
         mode: "proxy",
         imapHost: "imap.example.com",
         smtpHost: "smtp.example.com",
-        credential: "private-password",
+        ...clientCredential("private-password"),
       })
     ).data.id;
     assert.ok(mailbox);

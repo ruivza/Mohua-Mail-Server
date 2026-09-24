@@ -1,6 +1,6 @@
 import { Database } from "../src/database.js";
 import { createApp } from "../src/server.js";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, randomBytes, createCipheriv } from "node:crypto";
 import { after } from "node:test";
 const schemas = new Set();
 const connection = () =>
@@ -37,3 +37,22 @@ export async function cleanupTestDatabases() {
   }
 }
 if (process.env.NODE_TEST_CONTEXT) after(cleanupTestDatabases);
+
+
+export function clientCredential(password = "fixture-only", id = randomUUID()) {
+  const revision = randomUUID(), key = randomBytes(32), iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(`mohua-credential-v1\n${id}\n${revision}`));
+  const ciphertext = Buffer.concat([iv, cipher.update(password), cipher.final(), cipher.getAuthTag()]).toString("base64");
+  return { id, envelope: { revision, ciphertext } };
+}
+export async function authorizeFixture(app, id, password = "fixture-only") {
+  const a = await app.db.prepare("SELECT * FROM accounts WHERE id=?").get(id);
+  const { revision } = JSON.parse(a.credential.slice("client-v1:".length));
+  let device = await app.db.prepare("SELECT id FROM client_devices WHERE user_id=? AND revoked IS NULL LIMIT 1").get(a.user_id);
+  if (!device) { const created = await app.devices.enroll(a.user_id, { name: "Fixture", platform: "ios" }); device = { id: created.deviceId }; }
+  const key=randomBytes(32), iv=randomBytes(12), c=createCipheriv("aes-256-gcm",key,iv);
+  c.setAAD(Buffer.from(`mohua-credential-v1\n${id}\n${revision}`));
+  const ciphertext=Buffer.concat([iv,c.update(password),c.final(),c.getAuthTag()]).toString("base64");
+  app.leases.install(a,device.id,{challenge:app.leases.challenge(a,device.id),revision,key:key.toString("base64"),ciphertext,expiresAt:null});
+}

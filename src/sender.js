@@ -216,6 +216,8 @@ export class MailSender {
     const p = this.pending.get(id);
     if (!p) fail(409, "Prepared message expired");
     await authorize(p.account);
+    this.mail.leases?.assert(p.account);
+    job.account = p.account.id;
     if (job.cancelled || this.closed) fail(503, "Service closing");
     const claimed = await this.db
       .prepare(
@@ -314,7 +316,7 @@ export class MailSender {
         requireTLS: true,
         auth: {
           user: account.email,
-          pass: this.mail.decrypt(account.credential),
+          pass: this.mail.password(account),
         },
         tls: {
           servername: account.smtp_host,
@@ -422,6 +424,9 @@ export class MailSender {
       for (const s of streams) s.destroy();
     }
     return await this.status(id, user);
+  }
+  invalidate(account) {
+    for (const job of this.active.values()) if (job.account === account) { job.cancelled = true; job.abort?.(); job.smtp?.close(); job.client?.close(); job.sourceClient?.close(); }
   }
   async close() {
     this.closed = true;

@@ -1,3 +1,4 @@
+import { clientCredential, authorizeFixture } from "./helpers.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
@@ -113,10 +114,11 @@ test("HTTP body streaming and mutations enforce ownership, mode and validity", a
           mode: "proxy",
           imapHost: "imap.example.com",
           smtpHost: "smtp.example.com",
-          credential: "secret",
+          ...clientCredential("secret"),
         })
       ).json()
     ).id;
+    await authorizeFixture(app, id, "secret");
     const path = "/accounts/" + id + "/messages/1",
       q = "?uidValidity=7";
     const metadata = await (await call(path + q, a)).json();

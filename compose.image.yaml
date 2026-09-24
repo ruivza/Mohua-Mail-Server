@@ -1,0 +1,123 @@
+# Deploy prebuilt images without a source checkout or local build.
+name: mohua
+services:
+  database:
+    image: postgres:18-alpine
+    networks: [database]
+    environment:
+      POSTGRES_DB: mohua
+      POSTGRES_USER: mohua
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run node scripts/configure.mjs first}
+    volumes:
+      - mohua-postgres:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U mohua -d mohua']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+  server:
+    image: ${MOHUA_IMAGE:?Set MOHUA_IMAGE in .env to your published GHCR image}
+    environment:
+      PGHOST: database
+      PGPORT: 5432
+      PGDATABASE: mohua
+      PGUSER: mohua
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Run node scripts/configure.mjs first}
+      SETUP_TOKEN: ${SETUP_TOKEN:?Run node scripts/configure.mjs first}
+      OFFICIAL_PUSH_GATEWAY_URL: ${OFFICIAL_PUSH_GATEWAY_URL:-}
+      MAIL_BROKER_TOKEN: ${MAIL_BROKER_TOKEN:?Run node scripts/configure.mjs first}
+    depends_on:
+      database:
+        condition: service_healthy
+        restart: true
+    networks: [database, control, api, api-egress]
+    volumes:
+      - mohua-keys:/app/keys
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    ulimits:
+      core: 0
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3210/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+  mail-worker:
+    image: ${MOHUA_IMAGE:?Set MOHUA_IMAGE in .env}
+    user: "65532:65532"
+    command: [node, src/mail-worker.js]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3211
+      MASTER_KEY_FILE: ""
+      MAIL_BROKER_URL: http://server:3210/internal/mail
+      MAIL_BROKER_TOKEN: ${MAIL_BROKER_TOKEN:?Run node scripts/configure.mjs first}
+    networks: [control, mail-front, mail-egress]
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    ulimits:
+      core: 0
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3211/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+  edge:
+    image: nginx:1.28-alpine
+    user: "101:101"
+    entrypoint: [nginx, -g, "daemon off;"]
+    volumes:
+      - ./ops/mail-edge.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - '${MOHUA_BIND_ADDRESS:-127.0.0.1}:${MOHUA_PORT:-3210}:8080'
+    networks: [api, mail-front, edge-public]
+    depends_on:
+      server:
+        condition: service_healthy
+      mail-worker:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    ulimits:
+      core: 0
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+volumes:
+  mohua-postgres:
+  mohua-keys:
+
+networks:
+  database:
+    internal: true
+  control:
+    internal: true
+  api:
+    internal: true
+  mail-front:
+    internal: true
+  api-egress: {}
+  mail-egress: {}
+  edge-public: {}

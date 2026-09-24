@@ -66,7 +66,7 @@ function fixture(overrides = {}) {
   }
   const service = new MailService({
     db,
-    decrypt: () => "secret",
+    leases: { assert() {}, password: () => "secret" },
     resolveHost: async () => "1.1.1.1",
     imapFactory: (options) => {
       imapOptions = options;
@@ -171,4 +171,35 @@ test("watcher emits only mailbox-level change hints and stops them after stop", 
   f.client.emit("exists", { count: 4 });
   assert.equal(changes.length, 4);
   await f.service.close();
+});
+
+test("watcher retries after database outage instead of remaining stranded", async () => {
+  const f = fixture({retryMs:5});
+  try {
+    await f.service.start(f.account);
+    const active = f.service.active.bind(f.service);
+    let attempts=0;
+    f.service.active=async id=>{ if(++attempts<=2) throw Error('database unavailable'); return active(id); };
+    f.client.close();
+    const deadline=Date.now()+1000;
+    while(f.service.state('a').connectionStatus!=='listening' && Date.now()<deadline) await new Promise(r=>setTimeout(r,5));
+    assert.ok(attempts>=3);
+    assert.equal(f.service.state('a').connectionStatus,'listening');
+    assert.equal(f.service.state('a').disconnectedSince,null);
+  } finally {await f.service.close();}
+});
+
+test('stopping a watcher during its initial change callback cannot report listening afterward', async () => {
+  let release, entered;
+  const waiting = new Promise(resolve => {entered=resolve;});
+  const f = fixture({onChange:()=>new Promise(resolve=>{release=resolve;entered();})});
+  const starting=f.service.start(f.account);
+  try {
+    await waiting;
+    f.service.stop('a');
+    release();
+    await starting;
+    assert.equal(f.service.state('a').connectionStatus,'stopped');
+    assert.equal(f.service.jobs.size,0);
+  } finally {release?.();await starting;await f.service.close();}
 });

@@ -1,3 +1,7 @@
+import { MailBroker } from "./mail-broker.js";
+import { mailRoute } from "./mail-protocol.js";
+import { CredentialLeases, encodeEnvelope, envelope } from "./credential-leases.js";
+import { Operations, businessHealth } from "./operations.js";
 import { iosDeviceName } from "./device-name.js";
 import { AuthService } from "./auth.js";
 import { PushService } from "./push.js";
@@ -38,6 +42,7 @@ export async function createApp({
   dataDir = process.env.DATA_DIR || "data",
   keyPath = process.env.MASTER_KEY_FILE,
   setupToken = process.env.SETUP_TOKEN,
+  brokerToken = process.env.MAIL_BROKER_TOKEN,
   mailOptions = {},
   healthOptions = {},
   pushOptions = {},
@@ -68,6 +73,8 @@ export async function createApp({
       console.error("Database ownership lost; shutting down");
       closeOnLost();
     });
+    if (await db.prepare("SELECT 1 FROM accounts WHERE credential NOT LIKE 'client-v1:%' LIMIT 1").get())
+      throw Error("Legacy mailbox configurations must be deleted before starting this version");
   } catch (error) {
     await db.close();
     throw error;
@@ -99,14 +106,25 @@ export async function createApp({
     );
   }
   let devices, push, mail, reader, sender, health;
+  let broker;
+  const leases = brokerToken ? { status:a=>broker?.status(a)||{mode:"client",state:"locked",expiresAt:null}, revoke:id=>broker?.invalidate(id), revokeDevice:()=>{}, close:()=>{} } : new CredentialLeases({ onRevoke: id => { mail?.stop(id); reader?.invalidate(id); sender?.invalidate(id); mail?.status(id, "authorization_required"); } });
+  const leaseHints = new Map();
+  let leaseTimer, leaseTickRunning = false, leaseTick, lastLeaseScan = 0;
+
   try {
     devices = new DeviceService({ db, seal });
     push = new PushService({ db, decrypt, ...pushOptions });
     await push.initialize();
     devices.pushService = push;
+    devices.onRevoke = id => leases.revokeDevice(id);
+    if (brokerToken) {
+      mail = { state:id=>broker?.state(id)||{connectionStatus:"worker_unavailable"}, start:async()=>{}, stop:id=>broker?.invalidate(id), remove:id=>broker?.invalidate(id), close:async()=>{} };
+      reader = { invalidate:id=>broker?.invalidate(id), close:()=>{} };
+      sender = { invalidate:id=>broker?.invalidate(id), close:async()=>{} };
+    } else {
     mail = new MailService({
+      leases,
       db,
-      decrypt,
       ...mailOptions,
       onChange: async (id) => await devices.changed(id),
     });
@@ -114,6 +132,7 @@ export async function createApp({
     reader = new MailReader(mail);
     sender = new MailSender({ mail, reader, db });
     await sender.initialize();
+    }
     health = new HealthService({
       db,
       seal,
@@ -122,8 +141,30 @@ export async function createApp({
       ...healthOptions,
     });
     await health.initialize();
+    if (!brokerToken) leaseTimer = setInterval(() => {
+      leases.sweep();
+      if (leaseTickRunning || Date.now() - lastLeaseScan < 60000) return;
+      lastLeaseScan = Date.now();
+      leaseTickRunning = true;
+      leaseTick = (async () => {
+        const accounts = await db.prepare("SELECT * FROM accounts WHERE credential LIKE 'client-v1:%'").all();
+        const now = Date.now();
+        for (const a of accounts) {
+          const entry = leases.entries.get(a.id);
+          if (entry && !(await devices.allowed(entry.device, a.id))) leases.revoke(a.id);
+          const current = leases.entries.get(a.id);
+          if ((!current || (current.expires !== null && current.expires - now < 86400000)) && now - (leaseHints.get(a.id) || 0) >= 3600000) {
+            leaseHints.set(a.id, now); await push.enqueue(a.id);
+          }
+        }
+      })().catch(() => {}).finally(() => { leaseTickRunning = false; });
+    }, 1000);
+    leaseTimer?.unref();
     if (db.ownerLost) throw Error("Database ownership lost during startup");
   } catch (error) {
+    clearInterval(leaseTimer);
+    leases.close();
+    await leaseTick;
     await mail?.close();
     reader?.close();
     await sender?.close();
@@ -134,6 +175,7 @@ export async function createApp({
   }
   setupToken ||= token();
   const auth = new AuthService(db, setupToken);
+  if (brokerToken) broker = new MailBroker({db,auth,devices,push,token:brokerToken});
   const attempts = new Map();
   const limit = (req) => {
     const ip = req.socket.remoteAddress;
@@ -148,8 +190,20 @@ export async function createApp({
       for (const [k, v] of attempts) if (v.until < now) attempts.delete(k);
   };
   const publicAccount =
-    "id,email,mode,imap_host,imap_port,smtp_host,smtp_port,monitor_enabled";
+    "id,email,mode,imap_host,imap_port,smtp_host,smtp_port,monitor_enabled,credential";
+  const operations = new Operations();
   const server = http.createServer(async (req, res) => {
+    const requestStarted = performance.now();
+    let recorded = false;
+    const record = (aborted) => {
+      if (recorded) return;
+      recorded = true;
+      let path;
+      try { path = new URL(req.url, "http://localhost").pathname; } catch { return; }
+      operations.record({ method: req.method, path, status: res.statusCode, duration: performance.now() - requestStarted, aborted });
+    };
+    res.once("finish", () => record(false));
+    res.once("close", () => { if (!res.writableFinished) record(true); });
     const send = (status, body) => {
       res.writeHead(status, {
         "Content-Type": "application/json",
@@ -161,6 +215,13 @@ export async function createApp({
     try {
       const url = new URL(req.url, "http://localhost");
       const path = url.pathname;
+      if (path === "/internal/mail") {
+        if (!broker) return send(404,{error:"Not found"});
+        return await broker.handle(req,res);
+      }
+      // Reject before reading a body: the control process must never ingest
+      // mailbox unlock material, MIME bodies, compose text or attachment bytes.
+      if (broker && mailRoute(path)) return send(421,{error:"Mail requests require the isolated mail entrypoint"});
       if (req.method === "GET" && path === "/") {
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
@@ -198,15 +259,16 @@ export async function createApp({
         ].includes(path)
       )
         return send(404, { error: "Not found" });
-      if (req.method === "GET" && path === "/health") {
-        await db.query("SELECT 1");
-        return send(200, {
-          status: "ok",
-          service: "Mohua",
-          version: "0.8.0",
-          database: "postgresql",
-        });
+      // Public readiness probe: no credentials or external mail traffic.
+      if (req.method === "GET" && path === "/healthz") {
+        try {
+          await db.query("SELECT 1");
+          return send(200, { status: "ok" });
+        } catch {
+          return send(503, { status: "unavailable" });
+        }
       }
+      if (!path.startsWith("/api/")) return send(404, { error: "Not found" });
       let body = {};
       if (["POST", "PATCH"].includes(req.method)) {
         if (!req.headers["content-type"]?.startsWith("application/json"))
@@ -426,7 +488,7 @@ export async function createApp({
             await db
               .prepare(`SELECT ${publicAccount} FROM accounts WHERE user_id=?`)
               .all(user.id)
-          ).map((a) => ({ ...a, ...mail.state(a.id) })),
+          ).map((a) => ({ ...a, ...mail.state(a.id), credentialMode: "client", authorization: leases.status(a), credential: undefined })),
         );
       if (path === "/api/accounts" && req.method === "POST") {
         const email = string(body.email, "email").trim().toLowerCase();
@@ -443,8 +505,10 @@ export async function createApp({
         for (const port of [imapPort, smtpPort])
           if (!Number.isInteger(port) || port < 1 || port > 65535)
             fail(400, "Invalid port");
-        const credential = seal(string(body.credential, "credential", 1, 4096));
-        const id = randomUUID();
+        if (!body.envelope || Object.hasOwn(body, "credential")) fail(409, "Client encrypted credential required");
+        const credential = encodeEnvelope(body.envelope);
+        const id = string(body.id, "id", 36, 36);
+        if (!/^[a-f0-9-]{36}$/i.test(id)) fail(400, "Invalid mailbox ID");
         if (
           await db
             .prepare("SELECT id FROM accounts WHERE user_id=? AND email=?")
@@ -468,6 +532,32 @@ export async function createApp({
           );
         await devices.changed(id);
         return send(201, { id, connectionStatus: "not_connected" });
+      }
+      const leaseRoute = path.match(/^\/api\/accounts\/([^/]+)\/credential$/);
+      if (leaseRoute) {
+        if (!device) fail(403, "Device session required");
+        const result = await db.transaction(async () => {
+          const account = await db.prepare("SELECT * FROM accounts WHERE id=? AND user_id=? FOR UPDATE").get(leaseRoute[1], user.id);
+          if (!account) fail(404, "Mailbox not found");
+          await db.prepare("SELECT id FROM client_devices WHERE id=? FOR SHARE").get(device.id);
+          const activeSession = await db.prepare(`SELECT d.id FROM client_devices d
+            JOIN device_sessions ds ON ds.device_id=d.id JOIN sessions s ON s.id=ds.session_id
+            JOIN users u ON u.id=d.user_id WHERE s.id=? AND s.expires>? AND d.revoked IS NULL AND u.active=1
+            FOR SHARE OF d,s,u`).get(user.session_id, Date.now());
+          if (!activeSession) fail(401, "Access revoked");
+          if (req.method === "GET") return { envelope: envelope(account.credential), authorization: leases.status(account), challenge: leases.challenge(account, device.id) };
+          if (req.method === "POST") {
+            const authorization = leases.install(account, device.id, body);
+            return { authorized: true, authorization };
+          }
+          if (req.method === "DELETE") { leases.revoke(account.id); return { revoked: true }; }
+          fail(405, "Method not allowed");
+        });
+        if (req.method === "POST") {
+          const current = await mail.active(leaseRoute[1]);
+          if (current?.monitor_enabled) void mail.start(current);
+        }
+        return send(200, result);
       }
       const mutation = path.match(
         /^\/api\/accounts\/([^/]+)\/messages\/([1-9]\d{0,9})\/actions$/,
@@ -646,22 +736,26 @@ export async function createApp({
           return send(200, mail.state(account.id));
         }
         if (!action && req.method === "PATCH") {
-          const credential = seal(
-            string(body.credential, "credential", 1, 4096),
-          );
-          reader.invalidate(account.id);
-          mail.stop(account.id);
-          await db
-            .prepare("UPDATE accounts SET credential=? WHERE id=?")
-            .run(credential, account.id);
+          if (!body.envelope || Object.hasOwn(body, "credential")) fail(409, "Client encrypted credential required");
+          const credential = encodeEnvelope(body.envelope);
+          await db.transaction(async () => {
+            const fresh = await db.prepare("SELECT credential FROM accounts WHERE id=? FOR UPDATE").get(account.id);
+            if (!fresh || fresh.credential !== account.credential) fail(409, "Credential authorization changed");
+            await db.prepare("UPDATE accounts SET credential=? WHERE id=?").run(credential, account.id);
+            leases.revoke(account.id);
+          });
           if (account.monitor_enabled)
             void mail.start({ ...account, credential });
           return send(200, { updated: true });
         }
         if (!action && req.method === "DELETE") {
-          reader.invalidate(account.id);
-          mail.remove(account.id);
-          await db.prepare("DELETE FROM accounts WHERE id=?").run(account.id);
+          await db.transaction(async () => {
+            await db.prepare("SELECT id FROM accounts WHERE id=? FOR UPDATE").get(account.id);
+            await db.prepare("DELETE FROM accounts WHERE id=?").run(account.id);
+            leases.revoke(account.id);
+            mail.remove(account.id);
+          });
+          leaseHints.delete(account.id);
           return send(200, { removed: true });
         }
       }
@@ -676,6 +770,8 @@ export async function createApp({
         if (path === "/api/admin/health" && req.method === "GET")
           return send(200, {
             ...(await health.summary()),
+            business: await businessHealth(db, mail, push),
+            traffic: operations.snapshot(),
             counts: {
               users: (await db.prepare("SELECT COUNT(*) n FROM users").get()).n,
               activeUsers: (
@@ -690,8 +786,7 @@ export async function createApp({
           });
         if (path === "/api/admin/health/run" && req.method === "POST")
           return send(202, await health.run());
-        if (path === "/api/admin/health/settings" && req.method === "PATCH")
-          return send(200, await health.configure(body));
+
         if (path === "/api/admin/users" && req.method === "GET")
           return send(
             200,
@@ -741,6 +836,8 @@ export async function createApp({
         res.destroy();
         return;
       }
+      if ((error.status === 429 || error.status === 503) && Number.isFinite(error.retryAfter))
+        res.setHeader('Retry-After', String(Math.max(1, Math.min(86400, Math.ceil(error.retryAfter)))));
       const conflict = error.code === "23505";
       send(error.status || (conflict ? 409 : 500), {
         error: error.status
@@ -757,6 +854,9 @@ export async function createApp({
   function close() {
     if (closing) return closing;
     closing = (async () => {
+      clearInterval(leaseTimer);
+      leases.close();
+      await leaseTick;
       const stopped = new Promise((resolve) => server.close(resolve));
       server.closeAllConnections();
       await mail.close();
@@ -782,6 +882,8 @@ export async function createApp({
     devices,
     push,
     setupToken,
+    leases,
+    broker,
     close,
   };
 }
@@ -789,6 +891,7 @@ if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
+  if (!process.env.MAIL_BROKER_TOKEN) throw Error("Production startup requires an isolated mail worker and MAIL_BROKER_TOKEN");
   const app = await createApp();
   for (const signal of ["SIGINT", "SIGTERM"])
     process.on(signal, () => app.close().then(() => process.exit(0)));

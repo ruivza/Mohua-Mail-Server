@@ -9,7 +9,7 @@ const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
 function applyTheme() {
   const dark = theme === "dark" || (theme === "system" && systemTheme.matches);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#131715" : "#fafafa");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#1b1b1e" : "#ffffff");
 }
 systemTheme.addEventListener("change", () => { if (theme === "system") applyTheme(); });
 applyTheme();
@@ -172,3 +172,7 @@ function t(text) {
     const match = text.match(/^测试服务连接失败（(.+)），请检查网络、DNS 或 TLS$/);
     if (match) return `Test service connection failed (${match[1]}). Check the network, DNS or TLS.`;
   } return language === "en" ? (translations[text] ?? text) : (errorTranslations[text] ?? text); }
+
+Object.assign(translations, {"这里只展示业务健康；公网可用性由外部 Uptime 监测。": "Business health only. External Uptime monitors public availability.", "业务接口": "Application requests", "最近一小时 · 重启后重新统计": "Last hour · Resets on restart", "排除健康检查和管理接口；耗时包含传输时间。": "Excludes health checks and admin requests. Duration includes transfer time.", "手动诊断 · 邮件沙箱": "Manual diagnostics · Mail sandbox", "仅测试独立沙箱，不代表用户邮箱或服务可用率。": "Tests an isolated sandbox, not user mailboxes or service availability.", "监听连接": "Mailbox listeners", "已连接 / 应监听": "Connected / Expected", "邮箱监听": "Mailbox listeners", "仅统计已启用监听的活跃账号；持续异常指超过五分钟未连接。": "Active accounts with monitoring enabled only. Prolonged means disconnected for over five minutes.", "应监听": "Expected", "已连接": "Connected", "连接中": "Connecting", "重连中": "Reconnecting", "未运行": "Not running", "持续异常": "Prolonged disconnection", "发信结果": "Send outcomes", "最近24小时创建的发送任务；副本异常可能与部分发送重叠。": "Tasks created in the last 24 hours. Copy issues may overlap partial sends.", "发送失败": "Failed", "结果未知": "Unknown outcome", "部分发送": "Partially sent", "发送中": "Sending", "已发送副本异常": "Sent-copy issues", "通知队列": "Notification queue", "仅监控提交网关；正常限流和退避不算超期。": "Gateway submission only. Scheduled throttling and backoff are not overdue.", "推送未启用或未配置": "Push disabled or unconfigured", "待处理": "Pending", "重试中": "Retrying", "已到期未处理": "Due for processing", "最长超期（秒）": "Longest overdue (seconds)", "异常设备": "Devices with errors", "请求数": "Requests", "服务端错误": "Server errors", "连接中断": "Interrupted responses", "平均耗时（毫秒）": "Average duration (ms)", "暂无接口异常": "No recent request errors"});
+
+Object.assign(translations, {"方向键查看采样详情":"Use arrow keys to inspect samples", "未启用监听":"Monitoring not enabled", "需要处理":"Needs attention", "队列正常":"Queue healthy"});
