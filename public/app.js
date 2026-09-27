@@ -1,4 +1,14 @@
-let bearer = "",
+// Keep the short-lived session across reloads in this tab; never store login credentials.
+function readSession() {
+  try { return sessionStorage.getItem('mohua.admin.session') || ''; } catch { return ''; }
+}
+function saveSession(value) {
+  try {
+    if (value) sessionStorage.setItem('mohua.admin.session', value);
+    else sessionStorage.removeItem('mohua.admin.session');
+  } catch { /* Storage can be disabled; the current page can still sign in. */ }
+}
+let bearer = readSession(),
   me,
   health,
   poll,
@@ -43,6 +53,7 @@ async function api(path, method = "GET", data) {
   return body;
 }
 function lock() {
+  saveSession('');
   epoch++;
   clearInterval(poll);
   bearer = "";
@@ -427,6 +438,7 @@ $("login").onsubmit = async (e) => {
       Object.fromEntries(new FormData(e.target)),
     );
     bearer = r.token;
+    saveSession(bearer);
     e.target.password.value = "";
     e.target.setupToken.value = "";
     message("");
@@ -604,3 +616,5 @@ applyLanguage();
 
 let chartResize;
 window.addEventListener("resize", () => { clearTimeout(chartResize); chartResize = setTimeout(() => { if (health) { chart("memory-chart", "memory"); chart("cpu-chart", "cpu"); } }, 120); });
+
+if (bearer) void enter().catch((error) => message(error.message));

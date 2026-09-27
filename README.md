@@ -55,7 +55,7 @@ docker compose -f compose.test.yaml down
 
 ## 身份与权限
 
-- `administrators` / `admin_sessions`：只负责服务设置、健康自检、用户邀请与停用。管理会话有效期 24 小时，网页仅在内存保存令牌。
+- `administrators` / `admin_sessions`：只负责服务设置、健康自检、用户邀请与停用。管理会话有效期 24 小时，网页在当前标签页的 sessionStorage 保存会话令牌，刷新后通过 /api/me 验证并恢复登录；退出或会话失效时清除，不保存密码，刷新不会延长有效期。
 - `users` / `sessions` / `client_devices`：邀请注册的用户、其独立设备登录。设备会话有效期 30 天。
 - `accounts.user_id`：每个邮箱归属一个用户，同一用户的设备共享邮箱配置；不能跨用户访问。
 - 设备同步进度独立保存。退出登录会撤销当前设备；撤销某一设备不影响其他设备。停用用户会撤销该用户所有会话。
