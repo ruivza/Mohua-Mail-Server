@@ -18,6 +18,7 @@ let sentMessages = [],
   dropSendResponse = false,
   uncertainSend = false;
 
+let bodyDownloadsByAccount = {};
 let bodyDownloads = {},
   bodyCompleted = {},
   connections = 0,
@@ -53,6 +54,7 @@ function resetMail() {
   dropSendResponse = false;
   uncertainSend = false;
   bodyDownloads = {};
+  bodyDownloadsByAccount = {};
   bodyCompleted = {};
   slowBody = false;
   htmlMail = false;
@@ -83,7 +85,7 @@ const app = await createApp({
   dataDir: dir,
   mailOptions: {
     resolveHost: async () => "1.1.1.1",
-    imapFactory: () => {
+    imapFactory: (options) => {
       let selected = "INBOX";
       return {
         on() {},
@@ -179,6 +181,8 @@ const app = await createApp({
             (async function* () {
               if (part === "1") {
                 bodyDownloads[uid] = (bodyDownloads[uid] || 0) + 1;
+                const key = `${options.auth.user}:${uid}`;
+                bodyDownloadsByAccount[key] = (bodyDownloadsByAccount[key] || 0) + 1;
                 if (htmlMail && Number(uid) === 450) {
                   yield Buffer.from(htmlBody);
                   bodyCompleted[uid] = true;
@@ -295,6 +299,10 @@ for (const [id, mode] of [
 const handler = app.server.listeners("request")[0];
 app.server.removeListener("request", handler);
 app.server.on("request", async (req, res) => {
+  res.on("finish", () => {
+    if (res.statusCode >= 400 && !req.url.startsWith("/__test/"))
+      console.warn("fixture HTTP", req.method, req.url.split("?")[0], res.statusCode);
+  });
   // Local-only transfer regressions: never routes to a real mailbox.
   if (req.method === "GET" && req.url.startsWith("/__test/download/")) {
     const kind = req.url.split("/").at(-1);
@@ -348,6 +356,15 @@ app.server.on("request", async (req, res) => {
       )?.id;
     switch (req.url) {
       case "/__test/reset":
+        await app.db.prepare("UPDATE accounts SET sync_enabled=0,writeback_enabled=0,sync_credential=NULL,sync_status='off',purge_after=NULL,deletion_requested_at=NULL").run();
+        for (const id of app.sync.running.keys()) app.sync.invalidate(id);
+        await Promise.all([...app.sync.running.values()].map(job => job.promise));
+        await app.db.prepare("DELETE FROM mailbox_source_links").run();
+        await app.db.prepare("DELETE FROM mailbox_writebacks").run();
+        await app.db.prepare("DELETE FROM archive_messages").run();
+        await app.db.prepare("DELETE FROM archive_folders").run();
+        await app.db.prepare("DELETE FROM remote_drafts").run();
+        app.sync.last.clear();
         await app.db.prepare("DELETE FROM outbox").run();
         for (const d of await app.devices.list("fixture-owner"))
           await app.devices.revoke("fixture-owner", d.id);
@@ -358,7 +375,15 @@ app.server.on("request", async (req, res) => {
         resetMail();
         // Revoking fixture devices also revokes their in-memory mail leases.
         // Restore synthetic authorization so sync tests never need real credentials.
-        for (const id of ["fixture-proxy", "fixture-direct"]) await authorizeFixture(app, id);
+        for (const id of ["fixture-proxy", "fixture-direct"]) {
+          const mode=id==='fixture-proxy'?'proxy':'direct';
+          await app.db.prepare("INSERT INTO accounts(id,user_id,email,mode,imap_host,imap_port,smtp_host,smtp_port,credential) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING").run(id,'fixture-owner',mode+'@example.com',mode,'imap.example.com',993,'smtp.example.com',465,'client-v1:'+JSON.stringify(clientCredential('fixture-only',id).envelope));
+          if(!(await app.db.prepare("SELECT credential FROM accounts WHERE id=?").get(id)).credential){
+            const cred=clientCredential("fixture-only",id);
+            await app.db.prepare("UPDATE accounts SET credential=? WHERE id=?").run("client-v1:"+JSON.stringify(cred.envelope),id);
+          }
+          await authorizeFixture(app, id);
+        }
         await app.db.prepare("DELETE FROM invites").run();
         await app.db
           .prepare("INSERT INTO invites VALUES(?,?)")
@@ -427,9 +452,12 @@ app.server.on("request", async (req, res) => {
           ),
           alertsEnabled: Boolean((await app.db.prepare("SELECT push_alerts FROM client_devices WHERE id=?").get(await latest()))?.push_alerts),
           cancelledDownloads,
+          providerCredentialPresent: Boolean((await app.db.prepare("SELECT credential FROM accounts WHERE id='fixture-proxy'").get())?.credential),
+          persistentGrantPresent: Boolean((await app.db.prepare("SELECT sync_credential FROM accounts WHERE id='fixture-proxy'").get())?.sync_credential),
           sentMessages,
           inlineDownloads,
           bodyDownloads,
+          bodyDownloadsByAccount,
           bodyCompleted,
           connections,
           flags: [...(flags.get(499) ?? [])],

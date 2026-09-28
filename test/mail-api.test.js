@@ -141,7 +141,10 @@ test("mail API authenticates, updates secrets and closes workers on user disable
         password: "long-password-456",
       })
     ).data;
-    await call(`/accounts/${id}`, "DELETE", undefined, again.token);
+    await call(`/accounts/${id}`, "DELETE", {email:"mail@example.com"}, again.token);
+    const pending=await app.db.prepare("SELECT credential,purge_after FROM accounts WHERE id=?").get(id);
+    assert.equal(pending.credential,null);assert.ok(pending.purge_after);
+    app.storage.now=()=>pending.purge_after;await app.storage.sweep();
     assert.equal(app.mail.jobs.size, 0);
     assert.equal(
       (await app.db.prepare("SELECT COUNT(*) n FROM accounts").get()).n,

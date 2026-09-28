@@ -20,6 +20,7 @@ services:
   server:
     image: ${MOHUA_IMAGE:?Set MOHUA_IMAGE in .env to your published GHCR image}
     environment:
+      MAIL_FILES_DIR: /app/mail-files
       PGHOST: database
       PGPORT: 5432
       PGDATABASE: mohua
@@ -37,6 +38,7 @@ services:
     networks: [database, control, api, api-egress]
     volumes:
       - mohua-keys:/app/keys
+      - mohua-mail-files:/app/mail-files
     restart: unless-stopped
     stop_grace_period: 30s
     init: true
@@ -60,8 +62,11 @@ services:
       HOST: 0.0.0.0
       PORT: 3211
       MASTER_KEY_FILE: ""
+      MAIL_ARCHIVE_KEY_FILE: /app/mail-keys/sync.key
       MAIL_BROKER_URL: http://server:3210/internal/mail
       MAIL_BROKER_TOKEN: ${MAIL_BROKER_TOKEN:?Run node scripts/configure.mjs first}
+    volumes:
+      - mohua-mail-keys:/app/mail-keys
     networks: [control, mail-front, mail-egress]
     depends_on:
       server:
@@ -110,6 +115,8 @@ services:
 volumes:
   mohua-postgres:
   mohua-keys:
+  mohua-mail-keys:
+  mohua-mail-files:
 
 networks:
   database:

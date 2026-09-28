@@ -291,3 +291,14 @@ test('preview lookup failure skips content and preserves generic notification', 
     assert.deepEqual(changes.at(-1),['a','new_mail',undefined]);
   } finally {await f.service.close();}
 });
+
+
+test('independent mailbox IDLE wakes sync without sending a direct notification',async()=>{
+ const changes=[],wakes=[];const f=fixture({onChange:(...args)=>changes.push(args),onSyncChange:id=>wakes.push(id)});
+ try {
+  f.account.sync_enabled=1;await f.service.start(f.account);changes.length=0;
+  f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+  await Promise.all([...f.service.background]);
+  assert.deepEqual(changes,[]);assert.deepEqual(wakes,['a']);
+ }finally{await f.service.close();}
+});

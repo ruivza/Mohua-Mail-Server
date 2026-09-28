@@ -9,7 +9,7 @@ export const queries = {
   outboxResult: ["run", "UPDATE outbox SET state=?,result=? WHERE id=?"],
   outboxExpire: ["run", "UPDATE outbox SET state='expired' WHERE id=? AND state='prepared'"],
 };
-export const mailRoute = path => /^\/api\/(outbox(?:\/|$)|accounts\/[^/]+\/(credential|folders|messages|sync|outbox|verify)(?:\/|$))/.test(path);
+export const mailRoute = path => /^\/api\/(outbox(?:\/|$)|accounts\/[^/]+\/(credential|folders|messages|sync|sync-mode|drafts|outbox|verify)(?:\/|$))/.test(path);
 export async function jsonBody(req, max = 16384) {
   if (!req.headers["content-type"]?.startsWith("application/json")) throw Object.assign(Error("Use application/json"), { status: 415 });
   const chunks=[];let size=0;

@@ -34,6 +34,7 @@ export class MailService {
     timeoutMs = 30000,
     retryMs = 60000,
     onChange = () => {},
+    onSyncChange = () => {},
     needsPreview = async () => false,
   }) {
     Object.assign(this, {
@@ -45,6 +46,7 @@ export class MailService {
       timeoutMs,
       retryMs,
       onChange,
+      onSyncChange,
       needsPreview,
     });
     // Drop known library references when transports close. This is not secure
@@ -226,7 +228,7 @@ export class MailService {
           }
           if (this.jobs.get(account.id) !== job || this.closed) return;
           this.jobs.delete(account.id);
-          if (current?.monitor_enabled) await this.start(current);
+          if (current && (current.sync_enabled ? current.sync_credential : current.monitor_enabled)) await this.start(current);
           else this.status(account.id, "stopped");
         }), this.retryMs);
         job.timer.unref();
@@ -243,6 +245,7 @@ export class MailService {
               if (job.cancelled || this.closed) return;
               const current = await this.active(account.id);
               if (!current || job.cancelled || this.closed) return;
+              if(current.sync_enabled){await this.onSyncChange(account.id);return;}
               const newMail = event === "exists" && detail.path === "INBOX"
                 && Number.isInteger(detail.prevCount) && detail.count > detail.prevCount;
               let notification;
@@ -269,7 +272,8 @@ export class MailService {
                 finally { clearTimeout(timer); }
               }
               try {
-                if (job.cancelled || this.closed || !await this.active(account.id)) return;
+                const active = await this.active(account.id);
+                if (job.cancelled || this.closed || !active || active.sync_enabled) return;
                 this.leases?.assert(current);
                 await this.onChange(account.id, newMail ? "new_mail" : "sync", notification);
               } finally {

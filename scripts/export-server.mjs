@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, rmSync, readdirSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -6,6 +6,7 @@ const target = resolve(root, "dist/mohua-server");
 // An allowlist makes private code and local secrets impossible to include accidentally.
 const files = [
   "src",
+  "SYNC_MODE_ZH.md",
   "public",
   "ops/mail-edge.conf",
   "package.json",
@@ -36,5 +37,5 @@ rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });
 for (const file of files)
   cpSync(resolve(root, file), resolve(target, file), { recursive: true });
-cpSync(resolve(root, "docs/SERVER_README.md"), resolve(target, "README.md"));
+writeFileSync(resolve(target, "README.md"), readFileSync(resolve(root, "docs/SERVER_README.md"), "utf8").replaceAll("../SYNC_MODE_ZH.md", "SYNC_MODE_ZH.md"));
 console.log("Open-source server files exported to dist/mohua-server/");

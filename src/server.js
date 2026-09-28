@@ -1,3 +1,10 @@
+import { MailFiles } from "./mail-files.js";
+import { RemoteStorage } from "./remote-storage.js";
+import { RemoteDrafts } from "./remote-drafts.js";
+import { ArchiveStore, configureSync } from "./archive-store.js";
+import { ArchiveCrypto } from "./archive-crypto.js";
+import { ArchiveReader } from "./archive-reader.js";
+import { ArchiveSync } from "./archive-sync.js";
 import { MailBroker } from "./mail-broker.js";
 import { mailRoute } from "./mail-protocol.js";
 import { CredentialLeases, encodeEnvelope, envelope } from "./credential-leases.js";
@@ -40,6 +47,7 @@ export async function createApp({
   databaseUrl = process.env.DATABASE_URL,
   databaseSchema = process.env.DATABASE_SCHEMA || "public",
   dataDir = process.env.DATA_DIR || "data",
+  mailFilesDir = process.env.MAIL_FILES_DIR,
   keyPath = process.env.MASTER_KEY_FILE,
   setupToken = process.env.SETUP_TOKEN,
   brokerToken = process.env.MAIL_BROKER_TOKEN,
@@ -105,9 +113,12 @@ export async function createApp({
       "Database encryption key does not match. Restore the original master.key volume.",
     );
   }
-  let devices, push, mail, reader, sender, health;
+  let devices, push, mail, reader, sender, health, sync, remoteDrafts;
+  const files = new MailFiles(db,mailFilesDir || resolve(dataDir,"mail-files"));
+  try { await files.initialize(); } catch(error) { await db.close(); throw error; }
+  const archive = new ArchiveStore(db,files,(id,kind,notification)=>devices.changed(id,kind,notification));
   let broker;
-  const leases = brokerToken ? { status:a=>broker?.status(a)||{mode:"client",state:"locked",expiresAt:null}, revoke:id=>broker?.invalidate(id), revokeDevice:()=>{}, close:()=>{} } : new CredentialLeases({ onRevoke: id => { mail?.stop(id); reader?.invalidate(id); sender?.invalidate(id); mail?.status(id, "authorization_required"); } });
+  const leases = brokerToken ? { status:a=>broker?.status(a)||{mode:"client",state:"locked",expiresAt:null}, revoke:id=>broker?.invalidate(id), revokeDevice:()=>{}, close:()=>{} } : new CredentialLeases({ onRevoke: id => { sync?.invalidate(id); mail?.stop(id); reader?.invalidate(id); sender?.invalidate(id); mail?.status(id, "authorization_required"); } });
   const leaseHints = new Map();
   let leaseTimer, leaseTickRunning = false, leaseTick, lastLeaseScan = 0;
 
@@ -127,10 +138,14 @@ export async function createApp({
       db,
       ...mailOptions,
       needsPreview: id => push.needsPreview(id),
+      onSyncChange: id => sync?.wake(id),
       onChange: async (id, kind, notification) => await devices.changed(id, kind, notification),
     });
     await mail.restore();
-    reader = new MailReader(mail);
+    const live = new MailReader(mail), crypto = new ArchiveCrypto(resolve(dataDir,"mail-sync.key"));
+    remoteDrafts = new RemoteDrafts(archive,crypto);
+    sync = new ArchiveSync({reader:live,store:archive,crypto,leases});
+    reader = new ArchiveReader(live,archive,crypto);
     sender = new MailSender({ mail, reader, db });
     await sender.initialize();
     }
@@ -144,20 +159,25 @@ export async function createApp({
     await health.initialize();
     if (!brokerToken) leaseTimer = setInterval(() => {
       leases.sweep();
-      if (leaseTickRunning || Date.now() - lastLeaseScan < 60000) return;
+      if (leaseTickRunning || Date.now() - lastLeaseScan < 1000) return;
       lastLeaseScan = Date.now();
       leaseTickRunning = true;
       leaseTick = (async () => {
-        const accounts = await db.prepare("SELECT * FROM accounts WHERE credential LIKE 'client-v1:%'").all();
+        const accounts = await db.prepare("SELECT a.* FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.credential LIKE 'client-v1:%' AND u.active=1").all();
         const now = Date.now();
         for (const a of accounts) {
           const entry = leases.entries.get(a.id);
-          if (entry && !(await devices.allowed(entry.device, a.id))) leases.revoke(a.id);
+          if (entry && !entry.persistent && !(await devices.allowed(entry.device, a.id))) leases.revoke(a.id);
+          if(a.sync_enabled && a.sync_credential)void mail.start(a);
+          try { sync.restore(a); } catch { await archive.call("state",{accountId:a.id,state:"authorization_required"}); }
           const current = leases.entries.get(a.id);
           if ((!current || (current.expires !== null && current.expires - now < 86400000)) && now - (leaseHints.get(a.id) || 0) >= 3600000) {
             leaseHints.set(a.id, now); await push.enqueue(a.id);
           }
         }
+        sync.schedule(accounts);
+        const draftAccounts=await db.prepare("SELECT a.* FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.purge_after IS NULL AND u.active=1").all();
+        remoteDrafts.scheduleMigration(draftAccounts);
       })().catch(() => {}).finally(() => { leaseTickRunning = false; });
     }, 1000);
     leaseTimer?.unref();
@@ -176,7 +196,7 @@ export async function createApp({
   }
   setupToken ||= token();
   const auth = new AuthService(db, setupToken);
-  if (brokerToken) broker = new MailBroker({db,auth,devices,push,token:brokerToken});
+  if (brokerToken) broker = new MailBroker({files,db,auth,devices,push,token:brokerToken});
   const attempts = new Map();
   const limit = (req) => {
     const ip = req.socket.remoteAddress;
@@ -190,8 +210,13 @@ export async function createApp({
     if (attempts.size > 10000)
       for (const [k, v] of attempts) if (v.until < now) attempts.delete(k);
   };
+  const storage = new RemoteStorage(db, id => { leases.revoke(id); mail.stop(id); reader.invalidate(id); sender.invalidate(id); },Date.now,files);
+  let storageTick;
+  const sweepStorage = () => storageTick ||= storage.sweep().then(()=>files.collect()).then(()=>files.migrateArchive()).catch(error => { console.error("Remote storage cleanup failed", error.message); }).finally(() => storageTick = null);
+  await storage.sweep();
+  const storageTimer = setInterval(sweepStorage, 60000); storageTimer.unref();
   const publicAccount =
-    "id,email,mode,imap_host,imap_port,smtp_host,smtp_port,monitor_enabled,credential";
+    "id,email,mode,imap_host,imap_port,smtp_host,smtp_port,monitor_enabled,credential,writeback_enabled,sync_enabled,sync_status,sync_updated,purge_after";
   const operations = new Operations();
   const server = http.createServer(async (req, res) => {
     const requestStarted = performance.now();
@@ -271,12 +296,12 @@ export async function createApp({
       }
       if (!path.startsWith("/api/")) return send(404, { error: "Not found" });
       let body = {};
-      if (["POST", "PATCH"].includes(req.method)) {
+      if (["POST", "PATCH"].includes(req.method) || (req.method === "DELETE" && req.headers["content-type"])) {
         if (!req.headers["content-type"]?.startsWith("application/json"))
           fail(415, "Use application/json");
         const chunks = [];
         let size = 0;
-        const max = /^\/api\/accounts\/[^/]+\/outbox$/.test(path)
+        const max = path.includes("/drafts/") ? 37 * 1024 * 1024 : /^\/api\/accounts\/[^/]+\/outbox$/.test(path)
           ? 400000
           : 16384;
         for await (const chunk of req) {
@@ -375,6 +400,29 @@ export async function createApp({
           return send(200, { revoked: true });
         }
       }
+      const storageRoute = path.match(/^\/api\/accounts\/([^/]+)\/remote-storage$/);
+      if (storageRoute) {
+        const a = await db.prepare("SELECT * FROM accounts WHERE id=? AND user_id=?").get(storageRoute[1],user.id);
+        if(!a)fail(404,"Mailbox not found");
+        await deviceAllowed(a);
+        if(req.method==="GET")return send(200,await storage.status(a.id,url.searchParams.get("usage")==="1"));
+        if(req.method!=="POST")fail(405,"Method not allowed");
+        const result=await storage.change(a.id,user.id,body.action,body.email);
+        await devices.changed(a.id);
+        return send(200,result);
+      }
+      const scopedAccount = path.match(/^\/api\/accounts\/([^/]+)(?:\/|$)/);
+      if(scopedAccount && !path.endsWith("/sync-mode")) {
+        const a=await db.prepare("SELECT purge_after FROM accounts WHERE id=? AND user_id=?").get(scopedAccount[1],user.id);
+        if(a?.purge_after)fail(409,"Mailbox deletion pending");
+      }
+      const draftRoute = path.match(/^\/api\/accounts\/([^/]+)\/drafts(?:\/([^/]+))?$/);
+      if(draftRoute && remoteDrafts){
+        const a=await db.prepare("SELECT * FROM accounts WHERE id=? AND user_id=?").get(draftRoute[1],user.id);
+        if(!a)fail(404,"Mailbox not found");
+        await deviceAllowed(a);
+        return send(200,await remoteDrafts.handle(a,draftRoute[2],req.method,body));
+      }
       const prepareRoute = path.match(/^\/api\/accounts\/([^/]+)\/outbox$/);
       if (prepareRoute && req.method === "POST") {
         limit(req);
@@ -428,7 +476,7 @@ export async function createApp({
               if (
                 !(await db
                   .prepare(
-                    "SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN accounts a ON a.user_id=u.id WHERE s.id=? AND s.expires>? AND u.active=1 AND a.id=? AND a.mode=? AND a.credential=?",
+                    "SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN accounts a ON a.user_id=u.id WHERE s.id=? AND s.expires>? AND u.active=1 AND a.id=? AND a.mode=? AND a.credential IS NOT DISTINCT FROM ?",
                   )
                   .get(
                     user.session_id,
@@ -492,7 +540,7 @@ export async function createApp({
             await db
               .prepare(`SELECT ${publicAccount} FROM accounts WHERE user_id=?`)
               .all(user.id)
-          ).map((a) => ({ ...a, ...mail.state(a.id), credentialMode: "client", authorization: leases.status(a), credential: undefined })),
+          ).map((a) => ({ ...a, ...mail.state(a.id), credentialMode: a.credential ? "client" : "unbound", authorization: leases.status(a), credential: undefined })),
         );
       if (path === "/api/accounts" && req.method === "POST") {
         const email = string(body.email, "email").trim().toLowerCase();
@@ -537,6 +585,33 @@ export async function createApp({
         await devices.changed(id);
         return send(201, { id, connectionStatus: "not_connected" });
       }
+      const syncRoute = path.match(/^\/api\/accounts\/([^/]+)\/sync-mode$/);
+      if (syncRoute && sync) {
+        const a=await db.prepare("SELECT * FROM accounts WHERE id=? AND user_id=?").get(syncRoute[1],user.id);
+        if(!a)fail(404,"Mailbox not found");
+        await deviceAllowed(a);
+        if(req.method==="GET")return send(200,await archive.call("status",{accountId:a.id}));
+        if(req.method!=="POST"&&req.method!=="DELETE")fail(405,"Method not allowed");
+        if(req.method==="POST" && body.enabled===undefined && typeof body.writebackEnabled==="boolean"){
+          const result=await configureSync(db,a,{policyOnly:true,writebackEnabled:body.writebackEnabled});sync.wake(a.id);return send(200,result);
+        }
+        let pause=req.method==="DELETE";const enabled=pause?true:body.enabled;
+        if(typeof enabled!=="boolean")fail(400,"enabled must be boolean");
+        let credential=null;
+        if(enabled&&!pause){try{credential=await sync.credential(a);}catch(e){if(e.status!==423)throw e;pause=true;}}
+        await db.transaction(async()=>{
+          const live=await db.prepare(`SELECT s.id FROM sessions s
+            JOIN users u ON u.id=s.user_id JOIN device_sessions ds ON ds.session_id=s.id
+            JOIN client_devices d ON d.id=ds.device_id
+            WHERE s.id=? AND s.expires>? AND u.active=1 AND d.revoked IS NULL FOR SHARE OF s,u,d`).get(user.session_id,Date.now());
+          if(!live)fail(401,"Access revoked");
+          await configureSync(db,a,{enabled,pause,credential,writebackEnabled:body.writebackEnabled});
+        });
+        sync.invalidate(a.id);leases.revoke(a.id);
+        const fresh=await db.prepare("SELECT * FROM accounts WHERE id=?").get(a.id);
+        sync.restore(fresh);sync.schedule([fresh]);
+        return send(200,{updated:true});
+      }
       const leaseRoute = path.match(/^\/api\/accounts\/([^/]+)\/credential$/);
       if (leaseRoute) {
         if (!device) fail(403, "Device session required");
@@ -552,9 +627,13 @@ export async function createApp({
           if (req.method === "GET") return { envelope: envelope(account.credential), authorization: leases.status(account), challenge: leases.challenge(account, device.id) };
           if (req.method === "POST") {
             const authorization = leases.install(account, device.id, body);
+            if(account.sync_enabled && account.sync_status!=="paused")await configureSync(db,account,{enabled:true,credential:await sync.credential(account)});
             return { authorized: true, authorization };
           }
-          if (req.method === "DELETE") { leases.revoke(account.id); return { revoked: true }; }
+          if (req.method === "DELETE") {
+            if(account.sync_enabled)await configureSync(db,account,{enabled:true,pause:true});
+            leases.revoke(account.id); return { revoked: true };
+          }
           fail(405, "Method not allowed");
         });
         if (req.method === "POST") {
@@ -592,7 +671,7 @@ export async function createApp({
                 if (
                   !(await db
                     .prepare(
-                      "SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN accounts a ON a.user_id=u.id WHERE s.id=? AND s.expires>? AND u.active=1 AND a.id=? AND a.mode=? AND a.credential=?",
+                      "SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN accounts a ON a.user_id=u.id WHERE s.id=? AND s.expires>? AND u.active=1 AND a.id=? AND a.mode=? AND a.credential IS NOT DISTINCT FROM ?",
                     )
                     .get(
                       user.session_id,
@@ -688,7 +767,7 @@ export async function createApp({
             await deviceAllowed(account);
             const authorized = await db
               .prepare(
-                "SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN accounts a ON a.user_id=u.id WHERE s.id=? AND s.expires>? AND u.active=1 AND a.id=? AND a.mode=? AND a.credential=?",
+                "SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id JOIN accounts a ON a.user_id=u.id WHERE s.id=? AND s.expires>? AND u.active=1 AND a.id=? AND a.mode=? AND a.credential IS NOT DISTINCT FROM ?",
               )
               .get(
                 user.session_id,
@@ -733,7 +812,7 @@ export async function createApp({
           if (typeof body.enabled !== "boolean")
             fail(400, "enabled must be boolean");
           await db
-            .prepare("UPDATE accounts SET monitor_enabled=? WHERE id=?")
+            .prepare("UPDATE accounts SET monitor_enabled=? WHERE id=? AND purge_after IS NULL")
             .run(body.enabled ? 1 : 0, account.id);
           if (body.enabled) void mail.start({ ...account, monitor_enabled: 1 });
           else mail.stop(account.id);
@@ -743,9 +822,10 @@ export async function createApp({
           if (!body.envelope || Object.hasOwn(body, "credential")) fail(409, "Client encrypted credential required");
           const credential = encodeEnvelope(body.envelope);
           await db.transaction(async () => {
-            const fresh = await db.prepare("SELECT credential FROM accounts WHERE id=? FOR UPDATE").get(account.id);
+            const fresh = await db.prepare("SELECT credential,purge_after FROM accounts WHERE id=? FOR UPDATE").get(account.id);
+            if(fresh?.purge_after)fail(409,"Mailbox deletion pending");
             if (!fresh || fresh.credential !== account.credential) fail(409, "Credential authorization changed");
-            await db.prepare("UPDATE accounts SET credential=? WHERE id=?").run(credential, account.id);
+            await db.prepare("UPDATE accounts SET credential=?,sync_credential=NULL,sync_status=CASE WHEN sync_enabled=1 AND sync_status='paused' THEN 'paused' WHEN sync_enabled=1 THEN 'authorization_required' ELSE 'off' END WHERE id=?").run(credential, account.id);
             leases.revoke(account.id);
           });
           if (account.monitor_enabled)
@@ -753,14 +833,10 @@ export async function createApp({
           return send(200, { updated: true });
         }
         if (!action && req.method === "DELETE") {
-          await db.transaction(async () => {
-            await db.prepare("SELECT id FROM accounts WHERE id=? FOR UPDATE").get(account.id);
-            await db.prepare("DELETE FROM accounts WHERE id=?").run(account.id);
-            leases.revoke(account.id);
-            mail.remove(account.id);
-          });
+          const result=await storage.change(account.id,user.id,"delete",body.email);
+          await devices.changed(account.id);
           leaseHints.delete(account.id);
-          return send(200, { removed: true });
+          return send(200,result);
         }
       }
       if (path.startsWith("/api/admin/")) {
@@ -858,9 +934,13 @@ export async function createApp({
   function close() {
     if (closing) return closing;
     closing = (async () => {
+      clearInterval(storageTimer);
+      await storageTick;
       clearInterval(leaseTimer);
       leases.close();
       await leaseTick;
+      await sync?.close();
+      await remoteDrafts?.migrating;
       const stopped = new Promise((resolve) => server.close(resolve));
       server.closeAllConnections();
       await mail.close();
@@ -888,6 +968,9 @@ export async function createApp({
     setupToken,
     leases,
     broker,
+    storage,
+    files,
+    sync,
     close,
   };
 }

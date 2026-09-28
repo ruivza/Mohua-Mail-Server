@@ -1,11 +1,12 @@
+import { ArchiveStore, configureSync } from "./archive-store.js";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { queries, jsonBody, reply } from "./mail-protocol.js";
 const fail=(status,message)=>{throw Object.assign(Error(message),{status});};
 const digest=s=>createHash("sha256").update(s).digest();
 export class MailBroker {
-  constructor({db,auth,devices,push,token,now=Date.now}) {
+  constructor({db,files,auth,devices,push,token,now=Date.now}) {
     if(typeof token!=="string"||token.length<32)throw Error("Mail broker token must be at least 32 characters");
-    Object.assign(this,{db,auth,devices,push,token,now});this.registerTail=Promise.resolve();this.boot=randomUUID();this.worker=null;this.last=0;this.states=new Map();this.authorizations=new Map();this.invalidations=new Map();this.hints=new Map();
+    Object.assign(this,{db,auth,devices,push,token,now});this.archive=new ArchiveStore(db,files,(id,kind,notification)=>devices.changed(id,kind,notification));this.registerTail=Promise.resolve();this.boot=randomUUID();this.worker=null;this.last=0;this.states=new Map();this.authorizations=new Map();this.invalidations=new Map();this.hints=new Map();
   }
   invalidate(id){this.invalidations.set(id,(this.invalidations.get(id)||0)+1);this.states.delete(id);this.authorizations.delete(id);}
   state(id){return this.now()-this.last<10000?this.states.get(id)||{connectionStatus:"authorization_required"}:{connectionStatus:"worker_unavailable"};}
@@ -68,6 +69,19 @@ export class MailBroker {
         result={ok:true};
       }else if(b.op==="outboxList"){
         const {user}=await this.scope(b.token);result=await this.db.prepare("SELECT id,state,result FROM outbox WHERE user_id=? ORDER BY created DESC LIMIT 20").all(user.id);
+      }else if(b.op==="archive"){
+        result=await this.archive.call(b.operation,b.values||{});
+      }else if(b.op==="archiveConfigure"){
+        result=await this.db.transaction(async()=>{
+          const {account,user}=await this.scope(b.token,b.accountId,b.credentialRevision);
+          if(!account)fail(400,"Mailbox required");
+          const live=await this.db.prepare(`SELECT s.id FROM sessions s
+            JOIN users u ON u.id=s.user_id JOIN device_sessions ds ON ds.session_id=s.id
+            JOIN client_devices d ON d.id=ds.device_id
+            WHERE s.id=? AND s.expires>? AND u.active=1 AND d.revoked IS NULL FOR SHARE OF s,u,d`).get(user.session_id,this.now());
+          if(!live)fail(401,"Access revoked");
+          return configureSync(this.db,account,b.settings);
+        });
       }else if(b.op==="query"){
         const q=Object.hasOwn(queries,b.name)?queries[b.name]:null;if(!q||!Array.isArray(b.args)||b.args.length!==(q[1].match(/\?/g)||[]).length||b.args.some(v=>!(v===null||typeof v==="string"||Number.isFinite(v))))fail(400,"Unsupported mail store operation");
         if(b.name==="outboxResult"){

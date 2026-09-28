@@ -1,5 +1,8 @@
 # Mohua Server
 
+> 新增可选「同步模式」：与下文代理模式不同，它由邮件 worker 使用独立持久密钥加密保存后端授权、邮件原件、正文及附件；正文和索引在数据库，原件与附件在 `mohua-mail-files` 独立卷，控制服务仅保存密文。取消绑定立即清除密码包及持续授权，30 天内仅可恢复归档。App 登录过期/设备撤销不会终止已开启的独立同步授权。停止同步需使用邮箱设置中的对应操作，不删除已保存副本。详情与密钥备份要求见 [同步模式](../SYNC_MODE_ZH.md)。
+
+
 <img src="public/mohua.jpg" alt="Mohua" width="128" />
 
 自托管邮件代理，使用 Node.js 24 和 PostgreSQL 18。此发布包包含服务端、管理网页、Docker 编排和测试，不包含 iOS 源码、推送网关、运行数据或密钥。
@@ -26,7 +29,7 @@ docker compose up -d --build --wait
 - 查看：`docker compose ps`、`docker compose logs --tail=100 server`。
 - 更新：`docker compose up -d --build --wait`。
 - 停止：`docker compose down`；不带 `-v` 时保留数据。
-- 持久化：`mohua-postgres` 数据库卷与 `mohua-keys` 密钥卷，实际名称带 `mohua_` 前缀。
+- 持久化：`mohua-postgres` 数据库卷、`mohua-mail-files` 文件卷及 `mohua-keys` / `mohua-mail-keys` 密钥卷，实际名称带 `mohua_` 前缀。
 - 备份：停止 server 的写入后，用 `pg_dump` 导出数据库，同时备份 `/app/keys/master.key`。恢复必须配套；密钥不匹配时服务拒绝启动。
 - 同一数据库 schema 仅支持一个服务端进程。后台监听与队列通过运行锁避免多个实例重复处理。
 

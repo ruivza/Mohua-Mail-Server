@@ -43,6 +43,14 @@ export class CredentialLeases {
     this.entries.set(account.id, entry);
     return this.status(account);
   }
+  restore(account, data, persistent) {
+    const e = envelope(account.credential);
+    if (!e || data.revision !== e.revision) fail(409, "Credential authorization changed");
+    const entry = { key: bytes(data.key,32,32), ciphertext: bytes(data.ciphertext,29,8192), expires:null, device:null, credential:account.credential, revision:e.revision, persistent };
+    const clear = this.decode(account.id,entry); clear.fill(0);
+    const old=this.entries.get(account.id);if(old){old.key.fill(0);old.ciphertext.fill(0);}
+    this.entries.set(account.id,entry);
+  }
   decode(id, entry) {
     const b = entry.ciphertext, d = createDecipheriv("aes-256-gcm", entry.key, b.subarray(0, 12));
     d.setAAD(Buffer.from(credentialAAD(id, entry.revision))); d.setAuthTag(b.subarray(-16));
@@ -59,6 +67,7 @@ export class CredentialLeases {
     try { return clear.toString("utf8"); } finally { clear.fill(0); }
   }
   status(account) {
+    if (!account.credential) return {mode:"client",state:"locked",expiresAt:null};
     if (!isClientCredential(account.credential)) fail(409, "Client encrypted credential required");
     try { this.assert(account); } catch { return { mode: "client", state: "locked", expiresAt: null }; }
     return { mode: "client", state: "active", expiresAt: this.entries.get(account.id).expires };

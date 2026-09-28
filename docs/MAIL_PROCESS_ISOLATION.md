@@ -1,12 +1,15 @@
 # 邮件工作服务隔离
 
+> 新增可选「同步模式」：与下文代理模式不同，它由邮件 worker 使用独立持久密钥加密保存后端授权、邮件原件、正文及附件；正文和索引在数据库，原件与附件在 `mohua-mail-files` 独立卷，控制服务仅保存密文。取消绑定立即清除密码包及持续授权，30 天内仅可恢复归档。App 登录过期/设备撤销不会终止已开启的独立同步授权。停止同步需使用邮箱设置中的对应操作，不删除已保存副本。详情与密钥备份要求见 [同步模式](../SYNC_MODE_ZH.md)。
+
+
 生产部署使用四个容器：PostgreSQL、主 API、mail-worker、固定路由入口 edge。
 
 客户端仍连接原来的 HTTPS 地址。外部 TLS 代理将流量交给 edge；edge 将 credential、folders、messages、sync、outbox 和 verify 路径直接转给 mail-worker。主 API 在读取这些路径的请求体之前返回 421，禁止回退。正文、附件、写信内容和临时授权密钥不进入主 API 的正常处理路径。edge 是受信任的数据通道，仍能看到明文；入口与外部代理必须关闭正文日志及请求/响应磁盘缓冲。本配置禁用 Nginx 请求/响应缓冲，限制请求体为 26 MiB。
 
 ## 权限与网络
 
-主 API 以 uid 1000 运行，邮件服务以 uid/gid 65532 运行，入口为 101。各自独立 PID/挂载空间，丢弃 capabilities，禁止提权，只读根文件系统，core limit 为 0。mail-worker 没有主密钥卷、数据库环境变量或数据库网络；只有 /tmp tmpfs。主 API 不挂载 edge 配置，容器均不挂载 Docker socket。
+主 API 以 uid 1000 运行，邮件服务以 uid/gid 65532 运行，入口为 101。各自独立 PID/挂载空间，丢弃 capabilities，禁止提权，只读根文件系统，core limit 为 0。mail-worker 没有主密钥卷、数据库环境变量或数据库网络；另有 worker 专用的 `mohua-mail-keys` 归档密钥卷及 /tmp tmpfs。主 API 挂载 `mohua-mail-files`，只能读写文件密文。主 API 不挂载 edge 配置，容器均不挂载 Docker socket。
 
 MAIL_BROKER_TOKEN 为独立服务令牌，不是主密钥或数据库密码。`node scripts/configure.mjs` 在已有配置中只补充缺失令牌，不打印秘密。邮件服务通过内部网络调用 /internal/mail；edge 拒绝公开 /internal/。代理只接受命名白名单操作，不接受任意 SQL，不返回登录密码/管理员凭据/服务端主密钥。发信正文和附件只驻留 worker；主 API 保存摘要哈希与发送状态，不保存正文。
 

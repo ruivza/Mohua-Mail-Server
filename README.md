@@ -1,5 +1,12 @@
 > 目录说明：本目录为 Mohua 服务端；iOS 客户端已独立至桌面的 `Mohua-iOS` 目录。
 
+## 同步模式（可选）
+
+新增「同步模式」：后端主动保存所有邮件的完整原件、正文和附件，原邮箱删除后仍永久保留。App 退出登录或登录到期不影响后台同步；邮件 worker 使用独立密钥加密的持久授权，并可在重启后恢复。默认仍为代理模式，本文原有“不保存正文”的说明仅适用于代理模式。
+
+设置入口、停止/恢复、读取与删除边界、部署升级和密钥备份要求见 [同步模式说明](SYNC_MODE_ZH.md)。升级需要更新 server、mail-worker 和 edge，并新增保留 `mohua-mail-keys` 和 `mohua-mail-files` 卷。正文与索引存数据库，原件及附件存独立加密文件卷；取消绑定会立即清除提供商凭据，并进入 30 天删除恢复流程。
+
+
 # Mohua
 
 <img src="public/mohua.jpg" alt="Mohua" width="128" />
@@ -123,7 +130,7 @@ JSON 请求使用 `Content-Type: application/json`。登录后带 `Authorization
 
 增量请求为 `{folder,uidValidity,after,known}`：after 是上次成功保存的 highWater，known 是最多 500 个已加载 UID。返回 `{uidValidity,highWater,hasMore,items,existing}`；items 仅包含 after 之后的新摘要，existing 仅包含所查询 UID 中仍存在的邮件及 flags。每次最多跨 1000 个 UID，UID 空洞仍推进 highWater；hasMore 为 true 时继续请求。只可把 known 中缺少的 UID 视为移除，不可推断其他 UID。客户端将行数据与 highWater 原子保存，失败不推进。现有账号级 revision 仅作提示，不能以单文件夹或部分列表同步冒充整个账号已完成 ack。
 
-邮件操作需要 folder、uidValidity；列表分页支持 before、limit。旧 UIDVALIDITY 返回 409，应清除分页状态重载。发送结果不确定时不可自动重发。正文和附件不在服务器落盘。
+邮件操作需要 folder、uidValidity；列表分页支持 before、limit。旧 UIDVALIDITY 返回 409，应清除分页状态重载。发送结果不确定时不可自动重发。代理模式正文和附件不在服务器落盘；同步模式按上文持久保存。
 
 远程连接使用 HTTPS 反向代理，默认服务只监听 `127.0.0.1:3210`。环境配置：`DATABASE_URL`（或 `PG*`）、`HOST`、`PORT`、`DATA_DIR`、`MASTER_KEY_FILE`、`SETUP_TOKEN`。
 
@@ -143,7 +150,7 @@ CID 图片只读取当前邮件对应的附件，串行下载，下载后再次�
 
 首页和邮件列表底部可新建邮件；阅读页“更多操作”中可回复、回复全部或转发。支持选择 proxy 发件邮箱、收件人／抄送／密送、纯文本正文和文件附件。回复保留原线程、去重收件人并排除自己的邮箱；转发通过 original.eml 附件保留原邮件及其附件。引用正文最多 16000 字，长正文仅引用开头并标注。
 
-“草稿与发送记录”保存在本机，支持重启恢复，使用完整文件保护并排除备份，按服务器和设备隔离；退出登录或确认会话失效后清除。最多 100 条记录、草稿附件合计 250 MiB，不同步到其他设备或 IMAP 草稿箱。附件从系统文件选择器复制到草稿目录，不依赖原文件持续存在；单封最多 20 个文件、合计 25 MiB，正文上限 256 KiB，编码后请求还需满足服务器限制。
+代理模式的“草稿与发送记录”保存在本机，支持重启恢复，使用完整文件保护并排除备份，按服务器和设备隔离；退出登录或确认会话失效后清除。最多 100 条记录、草稿附件合计 250 MiB，不同步到其他设备或 IMAP 草稿箱。附件从系统文件选择器复制到草稿目录，不依赖原文件持续存在；单封最多 20 个文件、合计 25 MiB，正文上限 256 KiB，编码后请求还需满足服务器限制。
 
 已发送副本可选择由邮箱服务商保存，或由 Mohua 追加到唯一的已发送文件夹。服务商若自动保存，请不要再由 Mohua 保存。转发原邮件上限 25 MiB，最终 MIME 编码总量受服务端 40 MiB 上限约束。
 
@@ -167,7 +174,7 @@ App、Xcode 工程、服务端和项目目录统一为 Mohua。小鸟图标来�
 
 - 项目目录：`Mohua`；服务端包：`mohua-server`。
 - iOS Bundle ID：`com.mohua.app`；测试包：`com.mohua.app.uitests`。
-- 数据库：PostgreSQL；Docker 数据卷：`mohua-postgres`、`mohua-keys`（Compose 自动添加 `mohua_` 前缀）。
+- 数据库：PostgreSQL；Docker 数据卷：`mohua-postgres`、`mohua-keys`、`mohua-mail-keys`、`mohua-mail-files`（Compose 自动添加 `mohua_` 前缀）。
 - 推送应用 ID：`mohua`；同步载荷：`mohua`；登记挑战：`mohuaRegistration`。
 - iOS 构建配置：`MOHUA_GATEWAY_URL`、`MOHUA_PUSH_ENVIRONMENT`。
 - 本次没有修改 Kookaburra Relay 网关。新版推送要求网关支持应用 ID `mohua`、载荷 `mohua` 和挑战 `mohuaRegistration`，并配置 APNs topic `com.mohua.app`；当前旧网关未适配前无法完成新版登记和推送。Apple Developer 的 App ID 和签名描述文件也必须匹配，真机需重新登记。
@@ -190,6 +197,8 @@ docker compose cp server:/app/keys/master.key backups/master.key
 chmod 600 backups/database.dump backups/master.key
 docker compose start server
 ```
+
+同步模式还必须一致备份并恢复 `mohua-mail-files` 文件卷和 `mohua-mail-keys` worker 密钥卷，具体步骤见 [同步模式备份](SYNC_MODE_ZH.md#备份)。
 
 恢复时停止 server，通过 `pg_restore` 恢复到目标 PostgreSQL 数据库，并将配套 `master.key` 复制到服务端密钥卷后再启动。仅恢复其中一项无法解密已有邮箱凭证。`.env` 中的数据库密码和设置令牌也需私下保存。
 

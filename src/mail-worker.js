@@ -1,3 +1,7 @@
+import { RemoteDrafts } from "./remote-drafts.js";
+import { ArchiveCrypto } from "./archive-crypto.js";
+import { ArchiveReader } from "./archive-reader.js";
+import { ArchiveSync } from "./archive-sync.js";
 import http from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,32 +14,37 @@ import { MailSender } from "./sender.js";
 import { MailRemoteStore } from "./mail-remote-store.js";
 import { jsonBody, reply, mailRoute } from "./mail-protocol.js";
 const fail=(status,message)=>{throw Object.assign(Error(message),{status});};
-export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pollMs=1000,onLost=()=>{},onEmpty=()=>{}}){
+export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pollMs=1000,archiveKeyPath=process.env.MAIL_ARCHIVE_KEY_FILE||"data/mail-sync.key",onLost=()=>{},onEmpty=()=>{}}){
   const db=new MailRemoteStore({url:brokerUrl,token:brokerToken});
   const registration=await db.call("register");
-  let mail,reader,sender,closed=false,lastHeartbeat=0,tick,previous=new Map(),invalidations={},accounts=[];
+  let mail,reader,sender,sync,closed=false,lastHeartbeat=0,tick,previous=new Map(),invalidations={},accounts=[];
   const leases=new CredentialLeases({onRevoke:id=>{
-    mail?.stop(id);reader?.invalidate(id);sender?.invalidate(id);mail?.status(id,"authorization_required");
-    if(!leases.entries.size)setImmediate(()=>{if(!closed&&!leases.entries.size)onEmpty();});
+    sync?.invalidate(id);mail?.stop(id);reader?.invalidate(id);sender?.invalidate(id);mail?.status(id,"authorization_required");
+    if(!leases.entries.size)setImmediate(()=>{if(!closed&&!leases.entries.size&&!accounts.some(a=>a.sync_enabled))onEmpty();});
   }});
-  mail=new MailService({db,leases,...mailOptions,needsPreview:id=>db.call("needsPreview",{accountId:id}),onChange:(id,kind,notification)=>db.call("changed",{accountId:id,kind,notification})});
-  reader=new MailReader(mail);sender=new MailSender({db,reader,mail});await sender.initialize();
+  mail=new MailService({db,leases,...mailOptions,needsPreview:id=>db.call("needsPreview",{accountId:id}),onSyncChange:id=>sync?.wake(id),onChange:(id,kind,notification)=>db.call("changed",{accountId:id,kind,notification})});
+  const live=new MailReader(mail),crypto=new ArchiveCrypto(archiveKeyPath);
+  const archive={call:(operation,values)=>db.call("archive",{operation,values})};
+  const remoteDrafts=new RemoteDrafts(archive,crypto);
+  sync=new ArchiveSync({reader:live,store:archive,crypto,leases});
+  reader=new ArchiveReader(live,archive,crypto);sender=new MailSender({db,reader,mail});await sender.initialize();
   async function inventory(){
     const snapshot=accounts.map(a=>({id:a.id,...mail.state(a.id),authorization:leases.status(a)}));
     const data=await db.call("inventory",{snapshot});
     if(data.boot!==registration.boot)throw Error("Control service restarted");
     const present=new Map(data.accounts.map(a=>[a.id,a])),devices=new Set(data.devices);
     for(const [id,e] of leases.entries){
-      if(!present.has(id)||present.get(id).credential!==e.credential||!devices.has(e.device)||(data.invalidations[id]||0)!==(invalidations[id]||0))leases.revoke(id);
+      if(!present.has(id)||present.get(id).credential!==e.credential||(!e.persistent&&!devices.has(e.device))||(e.persistent&&present.get(id).sync_credential!==e.persistent)||(data.invalidations[id]||0)!==(invalidations[id]||0))leases.revoke(id);
     }
     for(const old of previous.values())if(!present.has(old.id)){mail.remove(old.id);reader.invalidate(old.id);sender.invalidate(old.id);}
     accounts=data.accounts;invalidations=data.invalidations;previous=present;
     for(const a of accounts){
-      if(a.monitor_enabled)void mail.start(a);else if(mail.jobs.has(a.id))mail.stop(a.id);
+      try{sync.restore(a);}catch{await archive.call("state",{accountId:a.id,state:"authorization_required"});}
+      if(a.sync_enabled ? !!a.sync_credential : a.monitor_enabled)void mail.start(a);else if(mail.jobs.has(a.id))mail.stop(a.id);
       const status=leases.status(a);
       if(status.state!=="active"||(status.expiresAt!==null&&status.expiresAt-Date.now()<86400000))await db.call("hint",{accountId:a.id});
     }
-    lastHeartbeat=Date.now();
+    lastHeartbeat=Date.now();sync.schedule(accounts);remoteDrafts.scheduleMigration(accounts);
   }
   try{await inventory();}catch(e){await sender.close();reader.close();await mail.close();throw e;}
   const timer=setInterval(()=>{
@@ -56,17 +65,41 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
       const user=scope.user,device=scope.device;
       const match=path.match(/^\/api\/accounts\/([^/]+)\/(.*)$/);
       let a;if(match)a=(await db.call("authorize",{token,accountId:match[1]})).account;
-      const authorize=async account=>{await db.call("authorize",{token,accountId:account.id,credential:account.credential});};
-      let body={};if(["POST","PATCH"].includes(req.method)){limit(device.id);body=await jsonBody(req,path.endsWith("/outbox")?400000:16384);}
+      const authorize=async account=>{await db.call("authorize",{token,accountId:account.id,credential:account.credential});if((await db.call("authorize",{token,accountId:account.id})).account.purge_after)fail(409,"Mailbox deletion pending");};
+      if(a?.purge_after && match?.[2]!=="sync-mode")fail(409,"Mailbox deletion pending");
+      let body={};if(["POST","PATCH"].includes(req.method)||(req.method==="DELETE"&&match?.[2].startsWith("drafts/")&&req.headers["content-type"])){limit(device.id);body=await jsonBody(req,match?.[2].startsWith("drafts/")?37*1024*1024:path.endsWith("/outbox")?400000:16384);}
+      if(match && /^drafts(?:\/[^/]+)?$/.test(match[2])){const result=await remoteDrafts.handle(a,match[2].split("/")[1],req.method,body);await authorize(a);return send(200,result);}
+      if(match&&match[2]==="sync-mode"){
+        if(req.method==="GET")return send(200,await archive.call("status",{accountId:a.id}));
+        if(req.method!=="POST"&&req.method!=="DELETE")fail(405,"Method not allowed");
+        if(req.method==="POST" && body.enabled===undefined && typeof body.writebackEnabled==="boolean"){
+          const result=await db.call("archiveConfigure",{token,accountId:a.id,credentialRevision:a.credential,settings:{policyOnly:true,writebackEnabled:body.writebackEnabled}});
+          sync.wake(a.id);return send(200,result);
+        }
+        let pause=req.method==="DELETE";const enabled=pause?true:body.enabled;
+        if(typeof enabled!=="boolean")fail(400,"enabled must be boolean");
+        let credential=null;
+        if(enabled&&!pause){try{credential=await sync.credential(a);}catch(e){if(e.status!==423)throw e;pause=true;}}
+        const result=await db.call("archiveConfigure",{token,accountId:a.id,credentialRevision:a.credential,settings:{enabled,pause,credential,writebackEnabled:body.writebackEnabled}});
+        sync.invalidate(a.id);leases.revoke(a.id);
+        await inventory();return send(200,result);
+      }
       if(match&&match[2]==="credential"){
         if(req.method==="GET")return send(200,{envelope:envelope(a.credential),authorization:leases.status(a),challenge:leases.challenge(a,device.id)});
         if(req.method==="POST"){
           const authorization=leases.install(a,device.id,body);
           try{await authorize(a);}catch(e){leases.revoke(a.id);throw e;}
+          if(a.sync_enabled && a.sync_status!=="paused"){
+            const credential=await sync.credential(a);
+            await db.call("archiveConfigure",{token,accountId:a.id,credentialRevision:a.credential,settings:{enabled:true,credential}});
+          }
           if(a.monitor_enabled)void mail.start(a);
           return send(200,{authorized:true,authorization});
         }
-        if(req.method==="DELETE"){leases.revoke(a.id);return send(200,{revoked:true});}
+        if(req.method==="DELETE"){
+          if(a.sync_enabled)await db.call("archiveConfigure",{token,accountId:a.id,credentialRevision:a.credential,settings:{enabled:true,pause:true}});
+          leases.revoke(a.id);return send(200,{revoked:true});
+        }
         fail(405,"Method not allowed");
       }
       if(match&&match[2]==="verify"&&req.method==="POST"){
@@ -99,7 +132,7 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
         if(action&&req.method==="POST"){
           const uid=Number(action[1]);if(uid>4294967295)fail(400,"Invalid UID");
           const result=await reader.mutate(a,options,uid,body,controller.signal,()=>authorize(a));
-          await db.call("changed",{accountId:a.id});return send(200,result);
+          if(a.sync_enabled)sync.wake(a.id);await db.call("changed",{accountId:a.id});return send(200,result);
         }
         let result;
         if(read&&read[1]==="sync"&&!read[2]&&req.method==="POST")result=await reader.sync(a,body,controller.signal);
@@ -128,8 +161,8 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
   });
   server.requestTimeout=600000;server.headersTimeout=10000;
   let closing;
-  const close=()=>closing||=(async()=>{closed=true;clearInterval(timer);leases.close();await tick;const stopped=new Promise(r=>server.close(r));server.closeAllConnections();reader.close();await mail.close();await sender.close();await db.call("release").catch(()=>{});await stopped;})();
-  return {server,close,leases,mail,reader,sender,db,inventory};
+  const close=()=>closing||=(async()=>{closed=true;clearInterval(timer);leases.close();await sync.close();await tick;await remoteDrafts.migrating;const stopped=new Promise(r=>server.close(r));server.closeAllConnections();reader.close();await mail.close();await sender.close();await db.call("release").catch(()=>{});await stopped;})();
+  return {server,close,leases,mail,reader,sender,db,inventory,sync,remoteDrafts};
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   for(const key of ["PGHOST","PGPASSWORD","DATABASE_URL","MASTER_KEY_FILE","SETUP_TOKEN"])if(process.env[key])throw Error("Mail worker must not receive database or master-key configuration");

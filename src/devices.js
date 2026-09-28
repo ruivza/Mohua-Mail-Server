@@ -186,7 +186,7 @@ export class DeviceService {
         `SELECT a.id,a.email,a.mode,a.imap_host,a.imap_port,a.smtp_host,a.smtp_port,
       COALESCE(m.acked,0) acked, COALESCE(r.revision,1) revision FROM accounts a
       LEFT JOIN device_mailboxes m ON m.account_id=a.id AND m.device_id=?
-      LEFT JOIN mailbox_revisions r ON r.account_id=a.id WHERE a.user_id=?`,
+      LEFT JOIN mailbox_revisions r ON r.account_id=a.id WHERE a.user_id=? AND a.purge_after IS NULL`,
       )
       .all(device.id, device.user_id);
     return {

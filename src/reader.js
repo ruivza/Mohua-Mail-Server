@@ -274,33 +274,7 @@ export class MailReader {
             download.content.destroy();
           }
         }
-        const address = (values) =>
-          (values || [])
-            .map((v) =>
-              v.name ? v.name + " <" + v.address + ">" : v.address || "",
-            )
-            .join(", ");
-        return {
-          uid,
-          uidValidity: o.validity,
-          flags: [...(meta.flags || [])],
-          replyTo: meta.envelope?.replyTo || meta.envelope?.from || [],
-          toAddresses: meta.envelope?.to || [],
-          ccAddresses: meta.envelope?.cc || [],
-          subject: meta.envelope?.subject || "",
-          from: address(meta.envelope?.from),
-          to: address(meta.envelope?.to),
-          date: meta.envelope?.date || null,
-          body: parts.body ? { contentType: parts.body.type } : null,
-          attachments: parts.attachments.map((a, id) => ({
-            id,
-            filename: a.filename,
-            size: a.size,
-            contentType: a.type,
-            contentId: a.contentId || null,
-            sizeIsEncoded: true,
-          })),
-        };
+        return messageMetadata(meta, o.validity, uid, parts);
       },
       signal,
       attachment === null ? 30000 : 600000,
@@ -442,4 +416,34 @@ export function splitStructure(root) {
     attachments.splice(attachments.indexOf(body), 1);
   }
   return { body, attachments };
+}
+
+export function messageMetadata(meta, validity, uid, parts = splitStructure(meta.bodyStructure)) {
+const address = (values) =>
+          (values || [])
+            .map((v) =>
+              v.name ? v.name + " <" + v.address + ">" : v.address || "",
+            )
+            .join(", ");
+        return {
+          uid,
+          uidValidity: validity,
+          flags: [...(meta.flags || [])],
+          replyTo: meta.envelope?.replyTo || meta.envelope?.from || [],
+          toAddresses: meta.envelope?.to || [],
+          ccAddresses: meta.envelope?.cc || [],
+          subject: meta.envelope?.subject || "",
+          from: address(meta.envelope?.from),
+          to: address(meta.envelope?.to),
+          date: meta.envelope?.date || null,
+          body: parts.body ? { contentType: parts.body.type } : null,
+          attachments: parts.attachments.map((a, id) => ({
+            id,
+            filename: a.filename,
+            size: a.size,
+            contentType: a.type,
+            contentId: a.contentId || null,
+            sizeIsEncoded: true,
+          })),
+        };
 }

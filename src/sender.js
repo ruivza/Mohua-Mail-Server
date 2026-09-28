@@ -288,7 +288,7 @@ export class MailSender {
           });
         }
       }
-      let sentClient = sourceClient,
+      let sentClient = sourceClient?.archive ? null : sourceClient,
         destination;
       if (data.sentCopy === "append") {
         if (!sentClient) {

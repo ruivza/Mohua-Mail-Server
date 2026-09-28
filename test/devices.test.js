@@ -240,7 +240,7 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       ).push_token,
       null,
     );
-    await api(`/accounts/${mailbox}`, second.token, "DELETE");
+    await api(`/accounts/${mailbox}`, second.token, "DELETE", {email:"mail@example.com"});
     assert.equal(
       (await api("/client/sync", second.token)).data.mailboxes.length,
       0,

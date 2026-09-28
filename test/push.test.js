@@ -375,3 +375,70 @@ test('expired ciphertext is cleared even without a configured gateway', async ()
     assert.equal((await f.db.prepare('SELECT count(*) n FROM push_jobs').get()).n,0);
   } finally {await f.close();}
 });
+
+
+test("push slots refill while one device is slow and overlapping flushes do not duplicate", {timeout:10000}, async () => {
+  let release, started = 0, active = 0, peak = 0, sixth;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const reached = new Promise(resolve => { sixth = resolve; });
+  const f = await fixture(async () => {
+    const number = ++started;
+    active++; peak = Math.max(peak, active);
+    try {
+      if (number === 1) await blocked;
+      if (number === 6) sixth();
+      return {status:200};
+    } finally { active--; }
+  });
+  let running;
+  try {
+    for (let i=0;i<6;i++) await f.register(await f.enroll("one"));
+    await f.devices.changed("a");
+    running = f.push.flush();
+    assert.equal(f.push.flush(), running);
+    await Promise.race([reached, new Promise((_,reject) => setTimeout(() => reject(Error("slow device blocked queue")), 3000).unref())]);
+    assert.equal(started, 6);
+    assert.ok(peak > 1 && peak <= 4);
+    release(); await running;
+    assert.equal((await f.db.prepare("SELECT count(*) n FROM push_jobs").get()).n, 0);
+  } finally { release(); await running; await f.close(); }
+});
+
+test("push worker failure waits for admitted work and prevents further admission", async () => {
+  let release, fail, entered = 0;
+  const blocked = new Promise(resolve => { release=resolve; });
+  const failed = new Promise(resolve => { fail=resolve; });
+  const push = new PushService({autoStart:false, db:{prepare:()=>({all:async()=>Array.from({length:8},(_,id)=>({id}))})}});
+  push.deliverJob = async job => {
+    entered++;
+    if(job.id===0) { fail(); throw Error("database unavailable"); }
+    await blocked;
+  };
+  let settled=false;
+  const running=push.deliver().finally(()=>{settled=true;});
+  const rejected=assert.rejects(running,/database unavailable/);
+  await failed; await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(settled,false);
+  assert.equal(entered,4);
+  release(); await rejected;
+  assert.equal(entered,4);
+});
+
+test("closing push service waits for four admitted sends without starting remaining devices", async () => {
+  let release, ready, entered=0;
+  const blocked=new Promise(resolve=>{release=resolve;});
+  const admitted=new Promise(resolve=>{ready=resolve;});
+  const push=new PushService({autoStart:false, provider:{close(){}}, db:{prepare:()=>({
+    run:async()=>{}, all:async()=>Array.from({length:8},(_,id)=>({id}))
+  })}});
+  push.settings.current=async()=>({gatewayUrl:'https://push.example.test'});
+  push.deliverJob=async()=>{if(++entered===4)ready();await blocked;};
+  const running=push.flush();
+  await admitted;
+  let closed=false;
+  const closing=push.close().then(()=>{closed=true;});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(closed,false);
+  release(); await closing; await running;
+  assert.equal(entered,4);
+});

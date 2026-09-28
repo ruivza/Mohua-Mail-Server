@@ -190,115 +190,128 @@ export class PushService {
         "SELECT * FROM push_jobs WHERE next_at<=? ORDER BY next_at LIMIT 20",
       )
       .all(this.now());
-    for (const job of jobs) {
-      if (this.closed) return;
-      const device = await this.eligible(job.device_id);
-      if (!device) {
-        await this.remove(job.device_id);
-        continue;
+    let next = 0;
+    // Refill each slot as soon as its request completes; keep one job per device.
+    // Await every worker even on database failure so flush/close never leave sends running.
+    let failure;
+    const worker = async () => {
+      while (!this.closed && !failure && next < jobs.length) {
+        const job = jobs[next++];
+        try { await this.deliverJob(job); }
+        catch (error) { failure = error; }
       }
-      const revision = (await this.settings.current()).revision;
-      let result;
-      try {
-        result = await this.provider.send(
-          device,
-          this.decrypt(device.push_credential),
-          job.kind === "new_mail" && device.push_alerts ? "new_mail" : "sync",
-          job.kind === "new_mail" && device.push_alerts && job.notification ? JSON.parse(job.notification) : undefined,
-        );
-      } catch {
-        result = { status: 0 };
-      }
-      await this.db.transaction(async () => {
-        if (this.closed) return;
-        await this.db
-          .prepare("SELECT id FROM push_settings WHERE id=1 FOR SHARE")
-          .get();
-        await this.db
-          .prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE")
-          .get(device.id);
-        if (revision !== (await this.settings.current()).revision) return;
-        // A late rejection of an old registration cannot invalidate a newly registered token.
-        const current = await this.eligible(device.id);
-        if (!current) {
-          await this.remove(device.id);
-          return;
-        }
-        if (current.push_registered !== device.push_registered) return;
-        if (result.status === 200) {
-          await this.db
-            .prepare(
-              "UPDATE client_devices SET push_last_sent=?,push_error=NULL,push_not_before=0 WHERE id=?",
-            )
-            .run(this.now(), device.id);
-          await this.db
-            .prepare("DELETE FROM push_jobs WHERE device_id=? AND generation=?")
-            .run(device.id, job.generation);
-          await this.db
-            .prepare(
-              "UPDATE push_jobs SET next_at=CASE WHEN kind='new_mail' AND alert_generation>? THEN CAST(? AS BIGINT) ELSE CAST(? AS BIGINT) END,attempts=0,kind=CASE WHEN kind='new_mail' AND alert_generation<=? THEN 'sync' ELSE kind END,notification=CASE WHEN alert_generation<=? THEN NULL ELSE notification END WHERE device_id=?",
-            )
-            .run(job.generation, this.now() + this.alertIntervalMs, this.now() + this.intervalMs, job.generation, job.generation, device.id);
-          return;
-        }
-        const invalid =
-          result.status === 410 ||
-          ["BadDeviceToken", "DeviceTokenNotForTopic"].includes(result.reason);
-        if (
-          invalid &&
-          !(
-            result.status === 410 &&
-            Number.isFinite(result.timestamp) &&
-            result.timestamp < device.push_registered
-          )
-        ) {
-          await this.db
-            .prepare(
-              `UPDATE client_devices SET push_credential=NULL,push_token=NULL,push_environment=NULL,
-          push_token_hash=NULL,push_error='not_registered' WHERE id=?`,
-            )
-            .run(device.id);
-          await this.remove(device.id);
-          return;
-        }
-        const retry =
-          !result.status ||
-          result.status === 429 ||
-          result.status >= 500 ||
-          result.status === 403 ||
-          invalid;
-        const attempts = job.attempts + 1;
-        const exhausted = attempts >= 8;
-        const delay = Math.max(
-          !retry || exhausted ? 3600000 : Math.min(3600000, 60000 * 2 ** (attempts - 1)),
-          retryAfterMs(result.retryAfter, this.now()),
-        ) + Math.floor(this.random() * 5000);
-        await this.db
-          .prepare(
-            "UPDATE client_devices SET push_error=?,push_not_before=? WHERE id=?",
-          )
-          .run(
-            result.status === 403
-              ? "configuration_error"
-              : !retry
-                ? "rejected"
-                : exhausted
-                  ? "retry_exhausted"
-                  : "retrying",
-            this.now() + delay,
-            device.id,
-          );
-        if (!retry || exhausted) {
-          await this.remove(device.id);
-          return;
-        }
-        await this.db
-          .prepare(
-            "UPDATE push_jobs SET attempts=?,next_at=? WHERE device_id=?",
-          )
-          .run(attempts, this.now() + delay, device.id);
-      });
+    };
+    await Promise.all(Array.from({ length: Math.min(4, jobs.length) }, worker));
+    if (failure) throw failure;
+  }
+  async deliverJob(job) {
+    if (this.closed) return;
+    const device = await this.eligible(job.device_id);
+    if (!device) {
+      await this.remove(job.device_id);
+      return;
     }
+    const revision = (await this.settings.current()).revision;
+    let result;
+    try {
+      result = await this.provider.send(
+        device,
+        this.decrypt(device.push_credential),
+        job.kind === "new_mail" && device.push_alerts ? "new_mail" : "sync",
+        job.kind === "new_mail" && device.push_alerts && job.notification ? JSON.parse(job.notification) : undefined,
+      );
+    } catch {
+      result = { status: 0 };
+    }
+    await this.db.transaction(async () => {
+      if (this.closed) return;
+      await this.db
+        .prepare("SELECT id FROM push_settings WHERE id=1 FOR SHARE")
+        .get();
+      await this.db
+        .prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE")
+        .get(device.id);
+      if (revision !== (await this.settings.current()).revision) return;
+      // A late rejection of an old registration cannot invalidate a newly registered token.
+      const current = await this.eligible(device.id);
+      if (!current) {
+        await this.remove(device.id);
+        return;
+      }
+      if (current.push_registered !== device.push_registered) return;
+      if (result.status === 200) {
+        await this.db
+          .prepare(
+            "UPDATE client_devices SET push_last_sent=?,push_error=NULL,push_not_before=0 WHERE id=?",
+          )
+          .run(this.now(), device.id);
+        await this.db
+          .prepare("DELETE FROM push_jobs WHERE device_id=? AND generation=?")
+          .run(device.id, job.generation);
+        await this.db
+          .prepare(
+            "UPDATE push_jobs SET next_at=CASE WHEN kind='new_mail' AND alert_generation>? THEN CAST(? AS BIGINT) ELSE CAST(? AS BIGINT) END,attempts=0,kind=CASE WHEN kind='new_mail' AND alert_generation<=? THEN 'sync' ELSE kind END,notification=CASE WHEN alert_generation<=? THEN NULL ELSE notification END WHERE device_id=?",
+          )
+          .run(job.generation, this.now() + this.alertIntervalMs, this.now() + this.intervalMs, job.generation, job.generation, device.id);
+        return;
+      }
+      const invalid =
+        result.status === 410 ||
+        ["BadDeviceToken", "DeviceTokenNotForTopic"].includes(result.reason);
+      if (
+        invalid &&
+        !(
+          result.status === 410 &&
+          Number.isFinite(result.timestamp) &&
+          result.timestamp < device.push_registered
+        )
+      ) {
+        await this.db
+          .prepare(
+            `UPDATE client_devices SET push_credential=NULL,push_token=NULL,push_environment=NULL,
+        push_token_hash=NULL,push_error='not_registered' WHERE id=?`,
+          )
+          .run(device.id);
+        await this.remove(device.id);
+        return;
+      }
+      const retry =
+        !result.status ||
+        result.status === 429 ||
+        result.status >= 500 ||
+        result.status === 403 ||
+        invalid;
+      const attempts = job.attempts + 1;
+      const exhausted = attempts >= 8;
+      const delay = Math.max(
+        !retry || exhausted ? 3600000 : Math.min(3600000, 60000 * 2 ** (attempts - 1)),
+        retryAfterMs(result.retryAfter, this.now()),
+      ) + Math.floor(this.random() * 5000);
+      await this.db
+        .prepare(
+          "UPDATE client_devices SET push_error=?,push_not_before=? WHERE id=?",
+        )
+        .run(
+          result.status === 403
+            ? "configuration_error"
+            : !retry
+              ? "rejected"
+              : exhausted
+                ? "retry_exhausted"
+                : "retrying",
+          this.now() + delay,
+          device.id,
+        );
+      if (!retry || exhausted) {
+        await this.remove(device.id);
+        return;
+      }
+      await this.db
+        .prepare(
+          "UPDATE push_jobs SET attempts=?,next_at=? WHERE device_id=?",
+        )
+        .run(attempts, this.now() + delay, device.id);
+    });
   }
   async remove(id) {
     await this.db.prepare("DELETE FROM push_jobs WHERE device_id=?").run(id);

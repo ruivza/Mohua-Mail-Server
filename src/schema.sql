@@ -40,3 +40,110 @@ WITH migration AS (
 )
 UPDATE accounts SET monitor_enabled=1
 WHERE mode='proxy' AND monitor_enabled=0 AND EXISTS (SELECT 1 FROM migration);
+
+-- Sync archives have an independent identity and never follow IMAP deletion.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS sync_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS sync_credential TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS sync_status TEXT NOT NULL DEFAULT 'off';
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS sync_updated BIGINT;
+CREATE TABLE IF NOT EXISTS archive_folders(
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  path TEXT NOT NULL, name TEXT NOT NULL, special_use TEXT,
+  validity TEXT NOT NULL, next_uid BIGINT NOT NULL DEFAULT 1,
+  cursor TEXT, PRIMARY KEY(account_id,path)
+);
+CREATE TABLE IF NOT EXISTS archive_messages(
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL, folder TEXT NOT NULL,
+  source_validity TEXT NOT NULL, source_uid BIGINT NOT NULL,
+  uid BIGINT, sort_time BIGINT NOT NULL DEFAULT 0, metadata TEXT NOT NULL, flags TEXT NOT NULL,
+  manifest TEXT, expected_parts TEXT NOT NULL, archived_at BIGINT,
+  FOREIGN KEY(account_id,folder) REFERENCES archive_folders(account_id,path) ON DELETE RESTRICT,
+  UNIQUE(account_id,folder,source_validity,source_uid), UNIQUE(account_id,folder,uid)
+);
+CREATE TABLE IF NOT EXISTS archive_chunks(
+  message_id TEXT NOT NULL REFERENCES archive_messages(id) ON DELETE CASCADE,
+  part TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL,
+  PRIMARY KEY(message_id,part,seq)
+);
+CREATE INDEX IF NOT EXISTS archive_message_date ON archive_messages(account_id,folder,sort_time DESC,uid DESC) WHERE uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS archive_message_page ON archive_messages(account_id,folder,uid) WHERE uid IS NOT NULL;
+
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS deletion_requested_at BIGINT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS purge_after BIGINT;
+CREATE INDEX IF NOT EXISTS accounts_purge_due ON accounts(purge_after) WHERE purge_after IS NOT NULL;
+CREATE TABLE IF NOT EXISTS remote_drafts(
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  id TEXT NOT NULL, revision TEXT, deleted_at BIGINT, updated BIGINT NOT NULL,
+  PRIMARY KEY(account_id,id)
+);
+CREATE TABLE IF NOT EXISTS remote_draft_versions(
+  account_id TEXT NOT NULL, draft_id TEXT NOT NULL, revision TEXT NOT NULL,
+  chunks INTEGER NOT NULL, created BIGINT NOT NULL,
+  PRIMARY KEY(account_id,draft_id,revision),
+  FOREIGN KEY(account_id,draft_id) REFERENCES remote_drafts(account_id,id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS remote_draft_chunks(
+  account_id TEXT NOT NULL,draft_id TEXT NOT NULL,revision TEXT NOT NULL,
+  seq INTEGER NOT NULL,payload TEXT NOT NULL,
+  PRIMARY KEY(account_id,draft_id,revision,seq),
+  FOREIGN KEY(account_id,draft_id,revision) REFERENCES remote_draft_versions(account_id,draft_id,revision) ON DELETE CASCADE
+);
+
+ALTER TABLE archive_messages ADD COLUMN IF NOT EXISTS message_hash TEXT;
+ALTER TABLE remote_drafts ADD COLUMN IF NOT EXISTS send_id TEXT;
+CREATE INDEX IF NOT EXISTS archive_sent_identity ON archive_messages(account_id,message_hash) WHERE uid IS NOT NULL;
+
+-- Credentials are absent while unbound; archive encryption is independent.
+ALTER TABLE accounts ALTER COLUMN credential DROP NOT NULL;
+ALTER TABLE remote_draft_versions ADD COLUMN IF NOT EXISTS storage_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE remote_draft_versions ADD COLUMN IF NOT EXISTS expected_files TEXT NOT NULL DEFAULT '[]';
+CREATE TABLE IF NOT EXISTS mail_file_store(id INTEGER PRIMARY KEY CHECK(id=1),identity TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mail_files(
+  id TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  message_id TEXT REFERENCES archive_messages(id) ON DELETE CASCADE,
+  draft_id TEXT,revision TEXT,part TEXT NOT NULL,created BIGINT NOT NULL,
+  FOREIGN KEY(account_id,draft_id,revision) REFERENCES remote_draft_versions(account_id,draft_id,revision) ON DELETE CASCADE,
+  UNIQUE(message_id,part),UNIQUE(account_id,draft_id,revision,part),
+  CHECK((message_id IS NOT NULL AND draft_id IS NULL AND revision IS NULL) OR (message_id IS NULL AND draft_id IS NOT NULL AND revision IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS mail_file_chunks(
+  file_id TEXT NOT NULL REFERENCES mail_files(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(file_id,seq)
+);
+CREATE TABLE IF NOT EXISTS mail_file_deletions(id TEXT PRIMARY KEY,account_id TEXT NOT NULL);
+CREATE OR REPLACE FUNCTION queue_mail_file_deletion() RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO mail_file_deletions(id,account_id) VALUES(OLD.id,OLD.account_id) ON CONFLICT DO NOTHING;
+  RETURN OLD;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS queue_mail_file_deletion ON mail_files;
+CREATE TRIGGER queue_mail_file_deletion AFTER DELETE ON mail_files FOR EACH ROW EXECUTE FUNCTION queue_mail_file_deletion();
+
+-- Upgrade already-pending deletions from the previous credential-retaining flow.
+UPDATE accounts SET credential=NULL,sync_credential=NULL,monitor_enabled=0 WHERE purge_after IS NOT NULL;
+
+-- Persistent first-observation boundary separates historical imports from new arrivals.
+ALTER TABLE archive_folders ADD COLUMN IF NOT EXISTS arrival_validity TEXT;
+ALTER TABLE archive_folders ADD COLUMN IF NOT EXISTS arrival_floor BIGINT;
+
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS writeback_enabled INTEGER NOT NULL DEFAULT 1;
+-- Existing mailbox preferences are preserved; new mailboxes default to writeback.
+ALTER TABLE accounts ALTER COLUMN writeback_enabled SET DEFAULT 1;
+ALTER TABLE archive_messages ADD COLUMN IF NOT EXISTS source_folder TEXT;
+UPDATE archive_messages SET source_folder=folder WHERE source_folder IS NULL;
+ALTER TABLE archive_messages ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+DO $$ DECLARE c RECORD; BEGIN
+ FOR c IN SELECT conname FROM pg_constraint WHERE conrelid='archive_messages'::regclass AND contype='u' AND pg_get_constraintdef(oid)='UNIQUE (account_id, folder, source_validity, source_uid)' LOOP
+ EXECUTE format('ALTER TABLE archive_messages DROP CONSTRAINT %I',c.conname);
+ END LOOP;
+END $$;
+CREATE TABLE IF NOT EXISTS mailbox_source_links(
+ account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,folder TEXT NOT NULL,validity TEXT NOT NULL,uid BIGINT NOT NULL,
+ message_id TEXT REFERENCES archive_messages(id) ON DELETE SET NULL,PRIMARY KEY(account_id,folder,validity,uid)
+);
+INSERT INTO mailbox_source_links SELECT account_id,source_folder,source_validity,source_uid,id FROM archive_messages ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS mailbox_writebacks(
+ id TEXT PRIMARY KEY,sequence BIGSERIAL UNIQUE,account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+ message_id TEXT NOT NULL REFERENCES archive_messages(id) ON DELETE CASCADE,action TEXT NOT NULL,destination TEXT,
+ state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_at BIGINT NOT NULL DEFAULT 0
+);
