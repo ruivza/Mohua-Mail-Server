@@ -21,6 +21,8 @@ export async function createTestApp(options = {}) {
       .slice(0, 24);
   schemas.add(schema);
   return createApp({
+    // Existing fixtures seed synthetic mailboxes without a provider connection.
+    requireMailboxVerification: false,
     ...options,
     databaseUrl: connection(),
     databaseSchema: schema,

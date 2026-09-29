@@ -12,9 +12,9 @@ import {credentialAAD} from "../src/credential-leases.js";
 import {MailRemoteStore} from "../src/mail-remote-store.js";
 import {mailRoute} from "../src/mail-protocol.js";
 const secret="synthetic-provider-password-isolation",bodyText="SYNTHETIC_BODY_NOT_FOR_CONTROL",composeText="SYNTHETIC_COMPOSE_NOT_FOR_CONTROL",attachment="SYNTHETIC_ATTACHMENT_NOT_FOR_CONTROL";
-async function fixture({pollMs=60000}={}){
+async function fixture({pollMs=60000,onEmpty=()=>{},strict=false}={}){
  const dir=await mkdtemp(join(tmpdir(),"mail-isolation-")),brokerToken=randomBytes(32).toString("hex");
- const control=await createTestApp({dataDir:dir,brokerToken});
+ const control=await createTestApp({dataDir:dir,brokerToken,requireMailboxVerification:strict});
  let observed="";control.server.prependListener("request",req=>req.on("data",b=>{observed+=b.toString();}));
  await new Promise(r=>control.server.listen(0,"127.0.0.1",r));
  const controlUrl=`http://127.0.0.1:${control.server.address().port}`;
@@ -29,13 +29,16 @@ async function fixture({pollMs=60000}={}){
   async download(){return {content:Readable.from([bodyText])};}
  }
  const mailOptions={resolveHost:async()=>"1.1.1.1",imapFactory:o=>{passwords.push(o.auth.pass);return new Client();},smtpFactory:o=>({verify:async()=>{passwords.push(o.auth.pass);},close(){},sendMail:async message=>{for await(const c of message.raw){}sent++;return {accepted:["recipient@example.test"],rejected:[]};}})};
- const worker=await createMailWorker({brokerUrl:controlUrl+"/internal/mail",brokerToken,mailOptions,pollMs});
+ const worker=await createMailWorker({brokerUrl:controlUrl+"/internal/mail",brokerToken,mailOptions,pollMs,onEmpty});
  await new Promise(r=>worker.server.listen(0,"127.0.0.1",r));const workerUrl=`http://127.0.0.1:${worker.server.address().port}`;
  const call=async(base,path,method="GET",body,token=device.token,headers={})=>{
   const response=await fetch(base+path,{method,headers:{Authorization:"Bearer "+token,...(body!==undefined?{"Content-Type":"application/json"}:{}),...headers},body:body===undefined?undefined:typeof body==="string"?body:JSON.stringify(body)});
   return response;
  };
- const payload=clientCredential(secret);const created=await call(controlUrl,"/api/accounts","POST",{...payload,email:"mail@example.test",mode:"proxy",imapHost:"imap.example.test",smtpHost:"smtp.example.test"});assert.equal(created.status,201);
+ const payload=clientCredential(secret);
+ const creation={...payload,email:"mail@example.test",mode:"proxy",imapHost:"imap.example.test",smtpHost:"smtp.example.test"};
+ if(strict){const checked=await call(workerUrl,`/api/accounts/${payload.id}/verify`,"POST",{...creation,preflight:true,authorization:temporaryAuthorization(payload)});assert.equal(checked.status,200);creation.verification=(await checked.json()).verification;}
+ const created=await call(controlUrl,"/api/accounts","POST",creation);assert.equal(created.status,201);
  await worker.inventory();
  let lastTemporaryKey;
  async function grant(){const path=`/api/accounts/${payload.id}/credential`,challenge=(await (await call(workerUrl,path)).json()).challenge;
@@ -45,7 +48,7 @@ async function fixture({pollMs=60000}={}){
   const response=await call(workerUrl,path,"POST",{challenge,revision:payload.envelope.revision,key:key.toString("base64"),ciphertext,expiresAt:Date.now()+86400000});assert.equal(response.status,200);
  }
  await grant();
- return {control,worker,dir,brokerToken,controlUrl,workerUrl,call,device,user,id:payload.id,grant,get temporaryKey(){return lastTemporaryKey;},get observed(){return observed;},get sent(){return sent;},get closed(){return closed;},passwords,close:async()=>{await worker.close();await control.close();await rm(dir,{recursive:true,force:true});}};
+ return {control,worker,dir,mailOptions,brokerToken,controlUrl,workerUrl,call,device,user,id:payload.id,grant,get temporaryKey(){return lastTemporaryKey;},get observed(){return observed;},get sent(){return sent;},get closed(){return closed;},passwords,close:async()=>{await worker.close();await control.close();await rm(dir,{recursive:true,force:true});}};
 }
 test("worker handles secrets, bodies and SMTP while control only sees scoped metadata",async()=>{
  const f=await fixture();try{
@@ -106,4 +109,46 @@ test('worker checks preview demand through the authenticated broker',async()=>{
   assert.equal(checked,f.id);
   await assert.rejects(f.worker.db.call('needsPreview',{accountId:null}),e=>e.status===400);
  }finally{await f.close();}
+});
+
+test("enabling sync does not exit while the replacement authorization is loading",async()=>{
+ let exits=0;const f=await fixture({onEmpty:()=>exits++});
+ try {
+  const original=f.worker.db.call.bind(f.worker.db);
+  f.worker.db.call=async(op,body)=>{if(op==="inventory")await new Promise(r=>setTimeout(r,30));return original(op,body);};
+  const response=await f.call(f.workerUrl,`/api/accounts/${f.id}/sync-mode`,"POST",{enabled:true});
+  assert.equal(response.status,200);
+  await new Promise(r=>setTimeout(r,60));
+  assert.equal(exits,0);
+  assert.equal((await f.call(f.workerUrl,"/healthz")).status,200);
+ } finally {await f.close();}
+});
+
+function temporaryAuthorization(payload){
+ const key=randomBytes(32),iv=randomBytes(12),c=createCipheriv("aes-256-gcm",key,iv);
+ c.setAAD(Buffer.from(credentialAAD(payload.id,payload.envelope.revision)));
+ return {revision:payload.envelope.revision,key:key.toString("base64"),ciphertext:Buffer.concat([iv,c.update(secret),c.final(),c.getAuthTag()]).toString("base64")};
+}
+test("strict mailbox saves require verification and rejected replacement preserves the old credential",async()=>{
+ const f=await fixture({strict:true});
+ try {
+  const unverified=clientCredential("wrong-password");
+  assert.equal((await f.call(f.controlUrl,"/api/accounts","POST",{...unverified,email:"new@example.test",mode:"proxy",imapHost:"imap.example.test",smtpHost:"smtp.example.test"})).status,422);
+  assert.equal(await f.control.db.prepare("SELECT id FROM accounts WHERE id=?").get(unverified.id),undefined);
+  const before=await f.control.db.prepare("SELECT credential FROM accounts WHERE id=?").get(f.id);
+  const replacement=clientCredential("replacement",f.id),authorization=temporaryAuthorization(replacement);
+  assert.equal((await f.call(f.controlUrl,`/api/accounts/${f.id}`,"PATCH",replacement)).status,422);
+  const original=f.mailOptions.imapFactory;
+  f.mailOptions.imapFactory=()=>{const client=new EventEmitter();client.close=()=>{};client.connect=async()=>{throw Object.assign(Error("provider private detail"),{authenticationFailed:true});};return client;};
+  const rejected=await f.call(f.workerUrl,`/api/accounts/${f.id}/verify`,"POST",{...replacement,preflight:true,updating:true,authorization});
+  assert.equal(rejected.status,422);assert.deepEqual(await rejected.json(),{error:"Mailbox authentication failed"});
+  assert.deepEqual(await f.control.db.prepare("SELECT credential FROM accounts WHERE id=?").get(f.id),before);
+  f.mailOptions.imapFactory=original;
+  const verified=await f.call(f.workerUrl,`/api/accounts/${f.id}/verify`,"POST",{...replacement,preflight:true,updating:true,authorization});
+  assert.equal(verified.status,200);
+  const proof=await verified.json();
+  assert.equal((await f.call(f.controlUrl,`/api/accounts/${f.id}`,"PATCH",{...replacement,...proof})).status,200);
+  assert.notEqual((await f.control.db.prepare("SELECT credential FROM accounts WHERE id=?").get(f.id)).credential,before.credential);
+  assert.equal(f.observed.includes(authorization.key),false);
+ } finally {await f.close();}
 });

@@ -77,7 +77,7 @@ docker compose -f compose.test.yaml down
 - 服务端：代理收信及发信 API、流式正文和附件、幂等发送状态、回复／转发、监听、同步版本提示。
 - 邮箱删除只删除 Mohua 配置，不删除服务商邮件。邮件“删除”操作移入垃圾箱，不执行永久删除。
 
-只支持公网邮箱服务器、IMAP 993 隐式 TLS、SMTP 465 隐式 TLS 或 587 强制 STARTTLS。添加后不会自动连接，可手动测试连接和启用监听。用户名为邮箱地址，IMAP/SMTP 使用同一个邮箱密码或应用专用密码。
+只支持公网邮箱服务器、IMAP 993 隐式 TLS、SMTP 465 隐式 TLS 或 587 强制 STARTTLS。添加或更新密码前必须通过 IMAP/SMTP 连接验证；后续是否持续连接由同步模式与监听设置决定。用户名为邮箱地址，IMAP/SMTP 使用同一个邮箱密码或应用专用密码。
 
 当前 iOS 仅支持 proxy 模式；支持纯文本写信、回复、转发、附件和本机草稿。已接入可选网关的静默推送与限时后台摘要同步，真实推送仍待配置签名和密钥后验收。尚无手机直连、OAuth、全邮箱离线下载、Face ID 或账号恢复。HTML 邮件支持安全排版与 CID 内嵌图片，远程图片默认阻止，可逐封允许 HTTPS 图片。真机验收仍需另行进行。
 
@@ -234,3 +234,12 @@ docker compose start server
 新版网关可以要求服务器先获批。把 `/api/client/push/config` 或管理推送配置中的 `serverId` 登记到网关「服务器接入」，选择允许的 `mohua` 应用并批准。将只显示一次的凭证放入业务 Server 的 `GATEWAY_SERVER_CREDENTIAL`，同时设置 `GATEWAY_SERVER_CREDENTIAL_URL` 为对应 HTTPS 网关根地址。留空 URL 时绑定 `OFFICIAL_PUSH_GATEWAY_URL`。这两个变量已接入 Compose；它们不能放进 iOS 或公开源码。
 
 已登录客户端通过 `POST /api/client/push/ticket {}` 获取绑定自身设备的五分钟一次性票据。Server 的长期凭证不返回客户端；验证/投递请求额外携带服务器身份头，切换到其他网关不会转发原凭证。未配置凭证时票据为 null，兼容未强制审批的网关。先更新两端并完成登记验证，再在网关开启强制审批。轮换或封禁会撤销旧登记，需要客户端重新登记。
+
+
+### 2026-09-29 邮箱验证与 worker 生命周期修复
+
+新增/更新邮箱凭据前，客户端先向隔离 worker 的 `POST /api/accounts/:id/verify` 提交 `preflight: true`、候选 envelope、连接参数和临时授权（更新时 `updating: true`）。只有 IMAP 与 SMTP 验证通过，才返回五分钟有效、绑定会话/邮箱配置/envelope 的签名 `verification` 回执；控制服务的新增/PATCH 接口要求此回执。失败不写账户或替换凭据；提供认证失败、超时和连接失败的固定错误，不返回上游敏感错误。永久客户端密钥不发送给控制服务或 worker。
+
+同步模式切换和 inventory 刷新期间延后空授权退出判断，并串行刷新账户快照；退出及 inventory 失败记录不含密码的原因分类。
+
+需要配套新版 iOS。原有邮箱继续工作；旧版客户端新增或更新邮箱会被拒绝，必须更新客户端。无数据库结构迁移，现有 Compose 和 Nginx `/verify` 路由可继续使用。测试专用 `createApp` 参数可关闭验证要求以构造已有合成账户，生产入口使用默认强制验证。

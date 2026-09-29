@@ -139,7 +139,7 @@ test("verification timeout releases job and does not disclose upstream secrets",
   });
   await assert.rejects(
     f.service.verify(f.account),
-    /Mailbox verification failed/,
+    /Mailbox connection timed out/,
   );
   assert.equal(f.service.jobs.size, 0);
   await f.service.close();

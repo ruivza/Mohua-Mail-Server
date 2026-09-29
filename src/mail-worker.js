@@ -1,3 +1,4 @@
+import { candidateMailbox, verifyCandidate, verificationReceipt } from "./mail-verification.js";
 import { RemoteDrafts } from "./remote-drafts.js";
 import { ArchiveCrypto } from "./archive-crypto.js";
 import { ArchiveReader } from "./archive-reader.js";
@@ -17,10 +18,15 @@ const fail=(status,message)=>{throw Object.assign(Error(message),{status});};
 export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pollMs=1000,archiveKeyPath=process.env.MAIL_ARCHIVE_KEY_FILE||"data/mail-sync.key",onLost=()=>{},onEmpty=()=>{}}){
   const db=new MailRemoteStore({url:brokerUrl,token:brokerToken});
   const registration=await db.call("register");
-  let mail,reader,sender,sync,closed=false,lastHeartbeat=0,tick,previous=new Map(),invalidations={},accounts=[];
+  let mail,reader,sender,sync,closed=false,lastHeartbeat=0,tick,previous=new Map(),invalidations={},accounts=[],transitions=0,emptyCheckPending=false;
+  function checkEmpty() {
+    if(!emptyCheckPending || closed || transitions)return;
+    emptyCheckPending=false;
+    if(!leases.entries.size&&!accounts.some(a=>a.sync_enabled))onEmpty();
+  }
   const leases=new CredentialLeases({onRevoke:id=>{
     sync?.invalidate(id);mail?.stop(id);reader?.invalidate(id);sender?.invalidate(id);mail?.status(id,"authorization_required");
-    if(!leases.entries.size)setImmediate(()=>{if(!closed&&!leases.entries.size&&!accounts.some(a=>a.sync_enabled))onEmpty();});
+    if(!leases.entries.size){emptyCheckPending=true;setImmediate(checkEmpty);}
   }});
   mail=new MailService({db,leases,...mailOptions,needsPreview:id=>db.call("needsPreview",{accountId:id}),onSyncChange:id=>sync?.wake(id),onChange:(id,kind,notification)=>db.call("changed",{accountId:id,kind,notification})});
   const live=new MailReader(mail),crypto=new ArchiveCrypto(archiveKeyPath);
@@ -28,7 +34,13 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
   const remoteDrafts=new RemoteDrafts(archive,crypto);
   sync=new ArchiveSync({reader:live,store:archive,crypto,leases});
   reader=new ArchiveReader(live,archive,crypto);sender=new MailSender({db,reader,mail});await sender.initialize();
-  async function inventory(){
+  let inventoryTail=Promise.resolve();
+  function inventory(){
+    const run=inventoryTail.then(refreshInventory);
+    inventoryTail=run.catch(()=>{});return run;
+  }
+  async function refreshInventory(){
+    transitions++;try {
     const snapshot=accounts.map(a=>({id:a.id,...mail.state(a.id),authorization:leases.status(a)}));
     const data=await db.call("inventory",{snapshot});
     if(data.boot!==registration.boot)throw Error("Control service restarted");
@@ -45,11 +57,12 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
       if(status.state!=="active"||(status.expiresAt!==null&&status.expiresAt-Date.now()<86400000))await db.call("hint",{accountId:a.id});
     }
     lastHeartbeat=Date.now();sync.schedule(accounts);remoteDrafts.scheduleMigration(accounts);
+    } finally { transitions--;setImmediate(checkEmpty); }
   }
   try{await inventory();}catch(e){await sender.close();reader.close();await mail.close();throw e;}
   const timer=setInterval(()=>{
     leases.sweep();if(tick||closed)return;
-    tick=inventory().catch(()=>{leases.close();onLost();}).finally(()=>tick=null);
+    tick=inventory().catch(e=>{console.error("Mail worker inventory failed",{status:e.status||null,code:e.code||null});leases.close();onLost();}).finally(()=>tick=null);
   },pollMs);timer.unref();
   const limits=new Map();
   function limit(id){const now=Date.now();for(const [k,v]of limits)if(v.until<now)limits.delete(k);const v=limits.get(id)||{count:0,until:now+60000};if(++v.count>120)fail(429,"Too many mail requests");limits.set(id,v);}
@@ -64,6 +77,21 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
       const scope=await db.call("authorize",{token});
       const user=scope.user,device=scope.device;
       const match=path.match(/^\/api\/accounts\/([^/]+)\/(.*)$/);
+      if(match && match[2]==="verify" && req.method==="POST") {
+        limit(device.id);
+        const body=await jsonBody(req);
+        if(body.preflight) {
+          const existing=body.updating ? (await db.call("authorize",{token,accountId:match[1]})).account : null;
+          const candidate=candidateMailbox(match[1],body,existing);
+          await verifyCandidate(candidate,body.authorization,mailOptions);
+          await db.call("authorize",{token,...(existing?{accountId:existing.id,credential:existing.credential}:{})});
+          return send(200,{verification:verificationReceipt(brokerToken,user.session_id,candidate)});
+        }
+        const account=(await db.call("authorize",{token,accountId:match[1]})).account;
+        const result=await mail.verify(account);
+        await db.call("authorize",{token,accountId:account.id,credential:account.credential});
+        return send(200,result);
+      }
       let a;if(match)a=(await db.call("authorize",{token,accountId:match[1]})).account;
       const authorize=async account=>{await db.call("authorize",{token,accountId:account.id,credential:account.credential});if((await db.call("authorize",{token,accountId:account.id})).account.purge_after)fail(409,"Mailbox deletion pending");};
       if(a?.purge_after && match?.[2]!=="sync-mode")fail(409,"Mailbox deletion pending");
@@ -81,8 +109,11 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
         let credential=null;
         if(enabled&&!pause){try{credential=await sync.credential(a);}catch(e){if(e.status!==423)throw e;pause=true;}}
         const result=await db.call("archiveConfigure",{token,accountId:a.id,credentialRevision:a.credential,settings:{enabled,pause,credential,writebackEnabled:body.writebackEnabled}});
-        sync.invalidate(a.id);leases.revoke(a.id);
-        await inventory();return send(200,result);
+        transitions++;
+        try {
+          sync.invalidate(a.id);leases.revoke(a.id);
+          await inventory();return send(200,result);
+        } finally { transitions--;setImmediate(checkEmpty); }
       }
       if(match&&match[2]==="credential"){
         if(req.method==="GET")return send(200,{envelope:envelope(a.credential),authorization:leases.status(a),challenge:leases.challenge(a,device.id)});
@@ -167,8 +198,8 @@ export async function createMailWorker({brokerUrl,brokerToken,mailOptions={},pol
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   for(const key of ["PGHOST","PGPASSWORD","DATABASE_URL","MASTER_KEY_FILE","SETUP_TOKEN"])if(process.env[key])throw Error("Mail worker must not receive database or master-key configuration");
   let app,stopping=false;
-  const stop=()=>{if(stopping)return;stopping=true;void app?.close().finally(()=>process.exit(0));};
-  app=await createMailWorker({brokerUrl:process.env.MAIL_BROKER_URL||"http://server:3210/internal/mail",brokerToken:process.env.MAIL_BROKER_TOKEN,onLost:stop,onEmpty:stop});
+  const stop=(reason="signal")=>{if(stopping)return;stopping=true;console.info("Mail worker stopping",{reason});void app?.close().finally(()=>process.exit(0));};
+  app=await createMailWorker({brokerUrl:process.env.MAIL_BROKER_URL||"http://server:3210/internal/mail",brokerToken:process.env.MAIL_BROKER_TOKEN,onLost:()=>stop("control_unavailable"),onEmpty:()=>stop("no_authorized_accounts")});
   for(const signal of ["SIGINT","SIGTERM"])process.on(signal,stop);
   app.server.listen(Number(process.env.PORT||3211),process.env.HOST||"0.0.0.0");
 }

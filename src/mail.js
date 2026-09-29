@@ -185,18 +185,15 @@ export class MailService {
         error: null,
       });
       return this.state(account.id);
-    } catch {
+    } catch (error) {
       if (this.jobs.get(account.id) === job)
         this.status(account.id, "error", {
           error:
             "Connection verification failed. Check host, TLS and credentials.",
         });
-      throw Object.assign(
-        new Error(
-          "Mailbox verification failed; check TLS, hosts and credentials",
-        ),
-        { status: 422 },
-      );
+      const auth = error.authenticationFailed || error.code === "EAUTH";
+      const timeout = error.message === "Timeout" || ["ETIMEDOUT","ETIMEOUT"].includes(error.code);
+      throw Object.assign(new Error(auth ? "Mailbox authentication failed" : timeout ? "Mailbox connection timed out" : "Mailbox connection failed"), { status: 422 });
     } finally {
       job.cancelled = true;
       job.client?.close();

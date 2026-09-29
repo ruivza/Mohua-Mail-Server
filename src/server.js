@@ -1,3 +1,4 @@
+import { candidateMailbox, verifyCandidate, verificationReceipt, requireVerification } from "./mail-verification.js";
 import { MailFiles } from "./mail-files.js";
 import { RemoteStorage } from "./remote-storage.js";
 import { RemoteDrafts } from "./remote-drafts.js";
@@ -52,6 +53,7 @@ export async function createApp({
   setupToken = process.env.SETUP_TOKEN,
   brokerToken = process.env.MAIL_BROKER_TOKEN,
   mailOptions = {},
+  requireMailboxVerification = true,
   healthOptions = {},
   pushOptions = {},
 } = {}) {
@@ -117,6 +119,7 @@ export async function createApp({
   const files = new MailFiles(db,mailFilesDir || resolve(dataDir,"mail-files"));
   try { await files.initialize(); } catch(error) { await db.close(); throw error; }
   const archive = new ArchiveStore(db,files,(id,kind,notification)=>devices.changed(id,kind,notification));
+  const verificationKey = brokerToken || randomBytes(32).toString("hex");
   let broker;
   const leases = brokerToken ? { status:a=>broker?.status(a)||{mode:"client",state:"locked",expiresAt:null}, revoke:id=>broker?.invalidate(id), revokeDevice:()=>{}, close:()=>{} } : new CredentialLeases({ onRevoke: id => { sync?.invalidate(id); mail?.stop(id); reader?.invalidate(id); sender?.invalidate(id); mail?.status(id, "authorization_required"); } });
   const leaseHints = new Map();
@@ -542,6 +545,15 @@ export async function createApp({
               .all(user.id)
           ).map((a) => ({ ...a, ...mail.state(a.id), credentialMode: a.credential ? "client" : "unbound", authorization: leases.status(a), credential: undefined })),
         );
+      const preflight = path.match(/^\/api\/accounts\/([^/]+)\/verify$/);
+      if (!broker && preflight && req.method === "POST" && body.preflight) {
+        limit(req);
+        const existing = body.updating ? await db.prepare("SELECT * FROM accounts WHERE id=? AND user_id=?").get(preflight[1],user.id) : null;
+        if(body.updating && !existing) fail(404,"Mailbox not found");
+        const candidate=candidateMailbox(preflight[1],body,existing);
+        await verifyCandidate(candidate,body.authorization,mailOptions);
+        return send(200,{verification:verificationReceipt(verificationKey,user.session_id,candidate)});
+      }
       if (path === "/api/accounts" && req.method === "POST") {
         const email = string(body.email, "email").trim().toLowerCase();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
@@ -567,6 +579,7 @@ export async function createApp({
             .get(user.id, email)
         )
           fail(409, "Mailbox already added");
+        if(requireMailboxVerification || body.verification) requireVerification(verificationKey,user.session_id,candidateMailbox(id,body),body.verification);
         await db
           .prepare(
             "INSERT INTO accounts(id,user_id,email,mode,imap_host,imap_port,smtp_host,smtp_port,credential) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -821,6 +834,7 @@ export async function createApp({
         if (!action && req.method === "PATCH") {
           if (!body.envelope || Object.hasOwn(body, "credential")) fail(409, "Client encrypted credential required");
           const credential = encodeEnvelope(body.envelope);
+          if(requireMailboxVerification || body.verification) requireVerification(verificationKey,user.session_id,candidateMailbox(account.id,body,account),body.verification);
           await db.transaction(async () => {
             const fresh = await db.prepare("SELECT credential,purge_after FROM accounts WHERE id=? FOR UPDATE").get(account.id);
             if(fresh?.purge_after)fail(409,"Mailbox deletion pending");

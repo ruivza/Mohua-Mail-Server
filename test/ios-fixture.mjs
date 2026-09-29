@@ -91,8 +91,10 @@ const app = await createApp({
         on() {},
         connect: async () => {
           connections++;
+          if (options.auth.pass === "wrong-password") throw Object.assign(Error("Synthetic authentication failure"), {authenticationFailed:true});
         },
         close() {},
+        logout: async () => {},
         append: async () => ({ uid: 999 }),
         capabilities: new Set(["MOVE"]),
         list: async () => [
@@ -451,6 +453,8 @@ app.server.on("request", async (req, res) => {
             )?.push_enabled,
           ),
           alertsEnabled: Boolean((await app.db.prepare("SELECT push_alerts FROM client_devices WHERE id=?").get(await latest()))?.push_alerts),
+          addedMailboxCount: (await app.db.prepare("SELECT COUNT(*) AS count FROM accounts WHERE email='added@example.com'").get()).count,
+          addedMailboxSyncEnabled: (await app.db.prepare("SELECT sync_enabled FROM accounts WHERE email='added@example.com'").get())?.sync_enabled ?? 0,
           cancelledDownloads,
           providerCredentialPresent: Boolean((await app.db.prepare("SELECT credential FROM accounts WHERE id='fixture-proxy'").get())?.credential),
           persistentGrantPresent: Boolean((await app.db.prepare("SELECT sync_credential FROM accounts WHERE id='fixture-proxy'").get())?.sync_credential),
