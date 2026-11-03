@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -29,6 +29,7 @@ const files = [
   "GATEWAY_PROTOCOL.md",
   "ENCRYPTED_NOTIFICATIONS.md",
   "scripts/export-server.mjs",
+  "README.md",
   "docs/SERVER_README.md",
   "docs/CLIENT_CREDENTIAL_LEASES.md",
   "docs/MAIL_PROCESS_ISOLATION.md",
@@ -38,13 +39,6 @@ const files = [
 ];
 rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });
+// The bundle keeps the repository layout, so README.md and its relative links copy unchanged.
 for (const file of files) cpSync(resolve(root, file), resolve(target, file), { recursive: true });
-// The bundle README sits at the root while the other docs keep their docs/ paths.
-writeFileSync(
-  resolve(target, "README.md"),
-  readFileSync(resolve(root, "docs/SERVER_README.md"), "utf8")
-    .replaceAll("../SYNC_MODE_ZH.md", "SYNC_MODE_ZH.md")
-    .replaceAll("(CLIENT_CREDENTIAL_LEASES.md)", "(docs/CLIENT_CREDENTIAL_LEASES.md)")
-    .replaceAll("(MAIL_PROCESS_ISOLATION.md)", "(docs/MAIL_PROCESS_ISOLATION.md)"),
-);
 console.log("Open-source server files exported to dist/mohua-server/");
