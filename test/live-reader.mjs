@@ -1,7 +1,4 @@
-import {
-  cleanupTestDatabases,
-  createTestApp as createApp,
-} from "./helpers.mjs";
+import { cleanupTestDatabases, createTestApp as createApp } from "./helpers.mjs";
 import nodemailer from "nodemailer";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,8 +49,7 @@ try {
       })
     ).json()
   ).token;
-  const invite = (await (await api("/admin/invites", "POST", {})).json())
-    .invite;
+  const invite = (await (await api("/admin/invites", "POST", {})).json()).invite;
   await api("/register", "POST", {
     email: "reader@example.com",
     password: "Temporary-test-password",
@@ -87,17 +83,10 @@ try {
     q = "?uidValidity=" + list.uidValidity;
   const message = await (await api(path + q)).json();
   assert.ok(message.body);
-  assert.match(
-    await (await api(path + "/body" + q)).text(),
-    /read integration marker/,
-  );
+  assert.match(await (await api(path + "/body" + q)).text(), /read integration marker/);
   await api(path + "/actions" + q, "POST", { action: "read" });
   const updated = await (await api(prefix + "/messages")).json();
-  assert.ok(
-    updated.items
-      .find((m) => m.uid === list.items[0].uid)
-      .flags.includes("\\Seen"),
-  );
+  assert.ok(updated.items.find((m) => m.uid === list.items[0].uid).flags.includes("\\Seen"));
   const bytes = await (await api(path + "/attachments/0" + q)).text();
   assert.match(bytes, /mohua attachment marker/);
   const preparedResponse = await fetch(base + "/api" + prefix + "/outbox", {
@@ -128,20 +117,12 @@ try {
   const result = await sendResponse.json();
   assert.equal(result.state, "sent", JSON.stringify(result));
   const sentList = await (await api(prefix + "/messages")).json();
-  const outgoing = sentList.items.find(
-    (m) => m.subject === "Mohua outgoing API",
-  );
+  const outgoing = sentList.items.find((m) => m.subject === "Mohua outgoing API");
   assert.ok(outgoing);
   const sentPath = prefix + "/messages/" + outgoing.uid + "/",
     sentQuery = "?uidValidity=" + sentList.uidValidity;
-  assert.match(
-    await (await api(sentPath + "body" + sentQuery)).text(),
-    /outgoing stream marker/,
-  );
-  assert.equal(
-    await (await api(sentPath + "attachments/0" + sentQuery)).text(),
-    "outgoing",
-  );
+  assert.match(await (await api(sentPath + "body" + sentQuery)).text(), /outgoing stream marker/);
+  assert.equal(await (await api(sentPath + "attachments/0" + sentQuery)).text(), "outgoing");
   console.log(
     "LIVE PASS: authenticated read, body/attachment streams, flags, SMTP send and received attachment verified in isolated Ethereal sandbox",
   );

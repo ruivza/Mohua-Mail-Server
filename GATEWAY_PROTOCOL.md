@@ -6,15 +6,15 @@ All production endpoints require HTTPS at one origin. No redirects. JSON bodies 
 
 ## Client enrollment
 
-1. Authenticated `GET /api/client/push/config` on Server returns `protocol`, `appId`, `mode`, `gatewayUrl`, `serverId`, `revision`, `enabled`, `pushStatus`. Client verifies gateway against its bundled trusted origin.
-2. Client calls gateway `POST /v1/registrations` with `appId`, `platform` (`ios`), `channel` (`apns`), `deviceId`, `serverId`, `deviceToken` (hex), `environment` (`sandbox` or `production`), `nonce` (random, at least 32 characters). Response 202 contains `registrationId`, `expiresAt`, **no challenge or credentials**.
+1. Authenticated `GET /api/client/push/config` on Server returns `protocol`, `appId`, `mode`, `gatewayUrl`, `serverId`, `revision`, `enabled`, `pushStatus`, plus `gatewayProtocols` and `registrationProtocol` (see [Kookaburra Relay 0.3.0](#kookaburra-relay-030-protocol-2)). Client verifies gateway against its bundled trusted origin.
+2. Client calls gateway `POST /v1/registrations` with `protocol` (the config's `registrationProtocol` when the client supports it), `appId`, `platform` (`ios`), `channel` (`apns`), `deviceId`, `serverId`, `deviceToken` (hex), `environment` (`sandbox` or `production`), `nonce` (random, at least 32 characters). Response 202 contains `registrationId`, `expiresAt`, **no challenge or credentials**.
 3. APNs sends `{aps:{"content-available":1},mohuaRegistration:{id,challenge,nonce,deviceId,serverId,appId}}`. Client must match its pending registration and active session.
 4. Client posts `appId`, `challenge` and `nonce` to `/v1/registrations/:id/confirm`. Proof expires after five minutes before confirmation. Response contains `registrationId`, `credential`, `revokeToken`, `expiresAt`; delivery credentials expire after 30 days. Confirmation retries return the same credentials. A proven replacement invalidates other grants for the same application, channel, APNs token and environment.
 5. Client stores secrets in protected Keychain and posts `{enabled:true,credential,revision}` to Server `/api/client/push`. Server validates with the gateway before saving encrypted credentials. Config or device changes during validation reject stale writes.
 
 ## Server delivery
 
-- `GET /v1/status?appId=mohua`: `{protocol:1,appId,ready:boolean,kinds:["sync"]}`; readiness is not proof of device delivery.
+- `GET /v1/status?appId=mohua`: `{protocol:1,protocols:[1,2],appId,ready:boolean,kinds:["sync"]}`; readiness is not proof of device delivery. Server accepts a gateway whose `protocols` (or, for older gateways, `protocol`) includes 1 or 2.
 - `POST /v1/validate`, bearer delivery credential; body `{appId,deviceId,serverId,kind:"sync"}`. Response 200 `{valid:true}`.
 - `POST /v1/notify`, same scope and credential; response 200 `{accepted:true}` means APNs accepted it, not that the device processed it.
 - For `sync`, gateway sends `{aps:{"content-available":1},mohua:{version:1,deviceId,appId}}`.
@@ -67,3 +67,18 @@ For `/v1/notify` or `/v1/jobs`, supply `{appId,deviceId,serverId,kind:"encrypted
 APNs uses type `alert`, priority `10`, app-configured fallback `aps.alert` and optional `sound:"default"`, `mutable-content:1` and `content-available:1`. The `relay` scope includes version, appId, deviceId, serverId and kind. The notification extension decrypts the envelope locally. AAD, sizes, key lifecycle and fallback behavior are specified in [ENCRYPTED_NOTIFICATIONS.md](ENCRYPTED_NOTIFICATIONS.md).
 
 网关是通用推送服务：按应用启用 `sync`、`alert`、`encrypted_alert`；新应用及旧应用默认仅 `sync`。Mohua 只申请 `sync` 与 `encrypted_alert`，不发送普通明文邮件通知。更改通知能力保留已有登记：新增能力需客户端申请对应授权，关闭能力仅禁止该类型并取消其未完成任务；其他能力不受影响。修改兜底文案无需重新登记。加密通知默认请求系统通知音，声音由用户在手机系统设置中控制。其他应用可以使用 `alert` 发送普通标题和内容，或自行约定密文内容；邮件字段与加密 AAD 属于 Mohua 业务协议。
+
+## Kookaburra Relay 0.3.0: protocol 2
+
+Relay 0.3.0 adds payload protocol 2 and keeps protocol 1 as the default for one more release only. `GET /v1/status` adds `protocols:[1,2]`. New Relay installations no longer create a default application, so the operator must create the `mohua` application (or the ID set with `PUSH_GATEWAY_APP_ID`) in the gateway console.
+
+| | Protocol 2 | Protocol 1 (removed in the next Relay release) |
+| --- | --- | --- |
+| Registration request | `"protocol":2`, `appId` required | `protocol` omitted or `1` |
+| Reception proof | `relayRegistration`; FCM `data.relayRegistration` (JSON string) | `perchRegistration`; FCM `data.perchRegistration` |
+| Sync hint | `relay:{version:2,kind:"sync",appId,deviceId}` | `perch:{version:1,appId,deviceId}` |
+| Collapse IDs | `relay-enroll-<id>`, `relay-sync` | `perch-enroll-<id>`, `perch-mail-sync` |
+
+Visible and encrypted alerts carry `relay:{version:1,appId,deviceId,serverId,kind}` under both protocols. The proof is confirmed exactly as before; clients keep validating appId, deviceId, serverId and nonce.
+
+Server `/api/client/push/config` reports `gatewayProtocols` (protocols both Server and gateway support) and `registrationProtocol` (the newest of them, or null when the gateway is unreachable or incompatible). Clients that understand protocol 2 send it at registration; older clients ignore these fields and keep protocol 1 until the gateway drops it. Server-to-gateway requests (`/v1/validate`, `/v1/notify`, `/v1/jobs`, `/v1/server-tickets`) are identical under both protocols.

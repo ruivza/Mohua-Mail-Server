@@ -23,9 +23,7 @@ export class ImapPool {
     if (this.closed || job.cancelled) throw Error("Cancelled");
     this.mail.leases?.assert(account);
     const key = this.key(account);
-    const index = this.idle.findIndex(
-      (entry) => entry.key === key && !entry.closed,
-    );
+    const index = this.idle.findIndex((entry) => entry.key === key && !entry.closed);
     if (index >= 0) {
       const [entry] = this.idle.splice(index, 1);
       clearTimeout(entry.timer);
@@ -61,13 +59,7 @@ export class ImapPool {
 
   release(entry, reusable) {
     if (!entry) return;
-    if (
-      !reusable ||
-      entry.closed ||
-      this.closed ||
-      this.idleMs <= 0 ||
-      this.maxIdle <= 0
-    ) {
+    if (!reusable || entry.closed || this.closed || this.idleMs <= 0 || this.maxIdle <= 0) {
       this.remove(entry);
       entry.client.close();
       return;
@@ -93,8 +85,7 @@ export class ImapPool {
   }
 
   invalidate(account) {
-    for (const entry of [...this.idle])
-      if (entry.account === account) this.discard(entry);
+    for (const entry of [...this.idle]) if (entry.account === account) this.discard(entry);
   }
 
   close() {

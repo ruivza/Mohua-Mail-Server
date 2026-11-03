@@ -2,21 +2,17 @@ import { lookup } from "node:dns/promises";
 import ipaddr from "ipaddr.js";
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
+import { MAIL_HOST, clean } from "./validate.js";
+import { SECOND, MINUTE } from "./limits.js";
 
 export async function publicAddress(host, resolver = lookup) {
-  if (
-    typeof host !== "string" ||
-    host.length > 253 ||
-    !/^[a-z0-9.-]+$/i.test(host)
-  )
+  if (typeof host !== "string" || host.length > 253 || !MAIL_HOST.test(host))
     throw new Error("Invalid host");
   const addresses = await resolver(host, { all: true });
   if (
     !addresses.length ||
     addresses.some(
-      ({ address }) =>
-        !ipaddr.isValid(address) ||
-        ipaddr.process(address).range() !== "unicast",
+      ({ address }) => !ipaddr.isValid(address) || ipaddr.process(address).range() !== "unicast",
     )
   )
     throw new Error("Public mail host required");
@@ -31,12 +27,16 @@ export class MailService {
     resolveHost = publicAddress,
     imapFactory = (options) => new ImapFlow(options),
     smtpFactory = (options) => nodemailer.createTransport(options),
-    timeoutMs = 30000,
-    retryMs = 60000,
+    timeoutMs = 30 * SECOND,
+    retryMs = MINUTE,
     onChange = () => {},
     onSyncChange = () => {},
     needsPreview = async () => false,
+    // Optional active-account lookup replacing the database query, for callers that check
+    // one fixed candidate account (mailbox verification).
+    active = null,
   }) {
+    this.activeLookup = active;
     Object.assign(this, {
       db,
       leases,
@@ -51,13 +51,17 @@ export class MailService {
     });
     // Drop known library references when transports close. This is not secure
     // erasure of JS strings or protection against a compromised runtime.
-    this.smtpFactory = options => {
-      const transport = smtpFactory(options), close = transport.close.bind(transport);
+    this.smtpFactory = (options) => {
+      const transport = smtpFactory(options),
+        close = transport.close.bind(transport);
       transport.close = (...args) => {
-        try { return close(...args); } finally {
+        try {
+          return close(...args);
+        } finally {
           if (options.auth) options.auth.pass = "";
           if (transport.transporter?.options?.auth) transport.transporter.options.auth.pass = "";
-          if (transport.transporter?.auth?.credentials) transport.transporter.auth.credentials.pass = "";
+          if (transport.transporter?.auth?.credentials)
+            transport.transporter.auth.credentials.pass = "";
         }
       };
       return transport;
@@ -79,12 +83,16 @@ export class MailService {
     this.states.set(id, {
       ...this.state(id),
       connectionStatus,
-      disconnectedSince: connectionStatus === "listening" || connectionStatus === "stopped" ? null : this.state(id).disconnectedSince || Date.now(),
+      disconnectedSince:
+        connectionStatus === "listening" || connectionStatus === "stopped"
+          ? null
+          : this.state(id).disconnectedSince || Date.now(),
       ...extra,
       pushStatus: "not_configured",
     });
   }
   async active(id) {
+    if (this.activeLookup) return await this.activeLookup(id);
     return await this.db
       .prepare(
         "SELECT a.* FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.id=? AND u.active=1",
@@ -95,8 +103,7 @@ export class MailService {
     return this.leases.password(account);
   }
   async imap(account, job) {
-    if (account.imap_port !== 993)
-      throw new Error("IMAP TLS requires port 993");
+    if (account.imap_port !== 993) throw new Error("IMAP TLS requires port 993");
     const address = await this.resolveHost(account.imap_host);
     if (job.cancelled) throw new Error("Cancelled");
     const auth = { user: account.email, pass: this.password(account) };
@@ -109,13 +116,26 @@ export class MailService {
       logger: false,
       connectionTimeout: 10000,
       greetingTimeout: 10000,
-      socketTimeout: 300000,
-      maxIdleTime: 120000,
+      socketTimeout: 5 * MINUTE,
+      maxIdleTime: 2 * MINUTE,
       tls: { rejectUnauthorized: true, minVersion: "TLSv1.2" },
     });
-    const connect = client.connect.bind(client), close = client.close.bind(client);
-    client.connect = async (...args) => { try { return await connect(...args); } finally { auth.pass = ""; } };
-    client.close = (...args) => { try { return close(...args); } finally { auth.pass = ""; } };
+    const connect = client.connect.bind(client),
+      close = client.close.bind(client);
+    client.connect = async (...args) => {
+      try {
+        return await connect(...args);
+      } finally {
+        auth.pass = "";
+      }
+    };
+    client.close = (...args) => {
+      try {
+        return close(...args);
+      } finally {
+        auth.pass = "";
+      }
+    };
     job.client = client;
     client.on("error", () => {
       if (!job.cancelled) client.close();
@@ -178,8 +198,7 @@ export class MailService {
         });
         await job.smtp.verify();
       });
-      if (job.cancelled || !(await this.active(account.id)))
-        throw new Error("Cancelled");
+      if (job.cancelled || !(await this.active(account.id))) throw new Error("Cancelled");
       this.status(account.id, "verified", {
         lastVerifiedAt: new Date().toISOString(),
         error: null,
@@ -188,12 +207,20 @@ export class MailService {
     } catch (error) {
       if (this.jobs.get(account.id) === job)
         this.status(account.id, "error", {
-          error:
-            "Connection verification failed. Check host, TLS and credentials.",
+          error: "Connection verification failed. Check host, TLS and credentials.",
         });
       const auth = error.authenticationFailed || error.code === "EAUTH";
-      const timeout = error.message === "Timeout" || ["ETIMEDOUT","ETIMEOUT"].includes(error.code);
-      throw Object.assign(new Error(auth ? "Mailbox authentication failed" : timeout ? "Mailbox connection timed out" : "Mailbox connection failed"), { status: 422 });
+      const timeout = error.message === "Timeout" || ["ETIMEDOUT", "ETIMEOUT"].includes(error.code);
+      throw Object.assign(
+        new Error(
+          auth
+            ? "Mailbox authentication failed"
+            : timeout
+              ? "Mailbox connection timed out"
+              : "Mailbox connection failed",
+        ),
+        { status: 422 },
+      );
     } finally {
       job.cancelled = true;
       job.client?.close();
@@ -203,31 +230,44 @@ export class MailService {
   }
   async start(account) {
     if (this.closed || this.jobs.has(account.id)) return;
-    try { this.leases?.assert(account); } catch { this.status(account.id, "authorization_required"); return; }
+    try {
+      this.leases?.assert(account);
+    } catch {
+      this.status(account.id, "authorization_required");
+      return;
+    }
     const job = { cancelled: false };
     this.jobs.set(account.id, job);
     this.status(account.id, "connecting", { error: null });
     const retry = () => {
-      if (job.cancelled || this.closed || this.jobs.get(account.id) !== job)
-        return;
+      if (job.cancelled || this.closed || this.jobs.get(account.id) !== job) return;
       job.cancelled = true;
       job.client?.close();
       this.status(account.id, "reconnecting");
       const scheduleRetry = () => {
-        job.timer = setTimeout(() => this.track(async () => {
-          if (this.jobs.get(account.id) !== job || this.closed) return;
-          let current;
-          try { current = await this.active(account.id); }
-          catch {
-            // Database outages must not permanently strand a cancelled watcher.
-            if (this.jobs.get(account.id) === job && !this.closed) scheduleRetry();
-            return;
-          }
-          if (this.jobs.get(account.id) !== job || this.closed) return;
-          this.jobs.delete(account.id);
-          if (current && (current.sync_enabled ? current.sync_credential : current.monitor_enabled)) await this.start(current);
-          else this.status(account.id, "stopped");
-        }), this.retryMs);
+        job.timer = setTimeout(
+          () =>
+            this.track(async () => {
+              if (this.jobs.get(account.id) !== job || this.closed) return;
+              let current;
+              try {
+                current = await this.active(account.id);
+              } catch {
+                // Database outages must not permanently strand a cancelled watcher.
+                if (this.jobs.get(account.id) === job && !this.closed) scheduleRetry();
+                return;
+              }
+              if (this.jobs.get(account.id) !== job || this.closed) return;
+              this.jobs.delete(account.id);
+              if (
+                current &&
+                (current.sync_enabled ? current.sync_credential : current.monitor_enabled)
+              )
+                await this.start(current);
+              else this.status(account.id, "stopped");
+            }),
+          this.retryMs,
+        );
         job.timer.unref();
       };
       scheduleRetry();
@@ -242,14 +282,24 @@ export class MailService {
               if (job.cancelled || this.closed) return;
               const current = await this.active(account.id);
               if (!current || job.cancelled || this.closed) return;
-              if(current.sync_enabled){await this.onSyncChange(account.id);return;}
-              const newMail = event === "exists" && detail.path === "INBOX"
-                && Number.isInteger(detail.prevCount) && detail.count > detail.prevCount;
+              if (current.sync_enabled) {
+                await this.onSyncChange(account.id);
+                return;
+              }
+              const newMail =
+                event === "exists" &&
+                detail.path === "INBOX" &&
+                Number.isInteger(detail.prevCount) &&
+                detail.count > detail.prevCount;
               let notification;
               let envelopeTimedOut = false;
               let preview = false;
               if (newMail) {
-                try { preview = await this.needsPreview(account.id); } catch { /* Fail closed for content access. */ }
+                try {
+                  preview = await this.needsPreview(account.id);
+                } catch {
+                  /* Fail closed for content access. */
+                }
               }
               if (job.cancelled || this.closed) return;
               if (newMail && preview) {
@@ -258,15 +308,23 @@ export class MailService {
                 try {
                   const message = await Promise.race([
                     client.fetchOne("*", { envelope: true }),
-                    new Promise((_, reject) => { timer = setTimeout(() => {
-                      envelopeTimedOut = true; reject(Error("Envelope timeout"));
-                    }, this.timeoutMs); }),
+                    new Promise((_, reject) => {
+                      timer = setTimeout(() => {
+                        envelopeTimedOut = true;
+                        reject(Error("Envelope timeout"));
+                      }, this.timeoutMs);
+                    }),
                   ]);
                   const from = message?.envelope?.from?.[0];
-                  const clean = (value, limit) => Array.from(String(value || "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").trim()).slice(0,limit).join("");
-                  notification = {sender:clean(from?.name || from?.address,120),subject:clean(message?.envelope?.subject,400)};
-                } catch { /* Missing metadata falls back to a generic alert, never a body fetch. */ }
-                finally { clearTimeout(timer); }
+                  notification = {
+                    sender: clean(from?.name || from?.address, 120),
+                    subject: clean(message?.envelope?.subject, 400),
+                  };
+                } catch {
+                  /* Missing metadata falls back to a generic alert, never a body fetch. */
+                } finally {
+                  clearTimeout(timer);
+                }
               }
               try {
                 const active = await this.active(account.id);

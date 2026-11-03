@@ -7,11 +7,11 @@ services:
       POSTGRES_USER: mohua_test
       POSTGRES_PASSWORD: local-disposable-test-only
     ports:
-      - '127.0.0.1:54329:5432'
+      - "127.0.0.1:54329:5432"
     tmpfs:
       - /var/lib/postgresql
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U mohua_test -d mohua_test']
+      test: [CMD-SHELL, "pg_isready -U mohua_test -d mohua_test"]
       interval: 2s
       timeout: 3s
       retries: 20

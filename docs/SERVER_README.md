@@ -20,7 +20,7 @@ docker compose up -d --build --wait
 
 没有本机 Node 时，第一步可用 `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim node scripts/configure.mjs`。
 
-打开 http://127.0.0.1:3210，用 `.env` 中的 `SETUP_TOKEN` 创建管理员，随后生成邀请让客户端用户注册。配置脚本生成独立随机的数据库密码和设置令牌；不会覆盖已有 `.env`。管理员与客户端用户是不同身份。
+打开 http://127.0.0.1:3210，用 `.env` 中的 `SETUP_TOKEN` 创建管理员，随后生成邀请让客户端用户注册。配置脚本生成独立随机的数据库密码、设置令牌和内部邮件令牌，并写入 `.env.example` 列出的其他变量及默认值；不会覆盖已有 `.env`，只补充缺失的变量，不打印秘密。管理员与客户端用户是不同身份。
 
 数据库在内部 Docker 网络，不对外开放端口。默认网页仅绑定本机；局域网调试可设置 `.env` 的 `MOHUA_BIND_ADDRESS`，公网应使用 HTTPS 反向代理。
 
@@ -41,6 +41,8 @@ docker compose -f compose.test.yaml down
 ```
 
 测试使用独立临时 PostgreSQL 和隔离 schema，不操作正式数据。也可配置 `TEST_DATABASE_URL` 后运行 `npm test`。本地 `npm start` 需要 `DATABASE_URL` 或标准 `PG*` 环境变量；不再支持 SQLite。
+
+代码格式由 Prettier 统一（`.prettierrc`：行宽 100，保留文件现有的 LF 或 CRLF 换行符）。`npm run format:check` 检查，`npm run format` 改写；两者通过 `npx` 使用固定版本 3.3.3，需要联网。CI 在测试前执行同一检查；Markdown 文档不参与格式化。
 
 推送通过 `OFFICIAL_PUSH_GATEWAY_URL` 配置，留空时可正常收发邮件但无法推送。此包没有修改笑翠鸟网关；新版 Mohua 推送协议需要网关另行适配。不要在 Server 放置 Apple 私钥。详见 [推送配置](APNS_SETUP_ZH.md) 和 [网关协议](GATEWAY_PROTOCOL.md)。
 

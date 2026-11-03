@@ -17,9 +17,7 @@ test("reject private, reserved, mapped and mixed DNS results; pin public address
     "192.0.2.1",
     "224.0.0.1",
   ])
-    await assert.rejects(
-      publicAddress("mail.example.com", async () => [{ address }]),
-    );
+    await assert.rejects(publicAddress("mail.example.com", async () => [{ address }]));
   await assert.rejects(
     publicAddress("mail.example.com", async () => [
       { address: "1.1.1.1" },
@@ -27,9 +25,7 @@ test("reject private, reserved, mapped and mixed DNS results; pin public address
     ]),
   );
   assert.equal(
-    await publicAddress("mail.example.com", async () => [
-      { address: "1.1.1.1" },
-    ]),
+    await publicAddress("mail.example.com", async () => [{ address: "1.1.1.1" }]),
     "1.1.1.1",
   );
 });
@@ -103,10 +99,7 @@ function fixture(overrides = {}) {
 test("verification pins DNS, checks TLS hostname, authenticates SMTP without sending", async () => {
   const f = await fixture();
   try {
-    assert.equal(
-      (await f.service.verify(f.account)).connectionStatus,
-      "verified",
-    );
+    assert.equal((await f.service.verify(f.account)).connectionStatus, "verified");
     assert.equal(f.imapOptions.host, "1.1.1.1");
     assert.equal(f.imapOptions.servername, "imap.example.com");
     assert.equal(f.imapOptions.logger, false);
@@ -137,10 +130,7 @@ test("verification timeout releases job and does not disclose upstream secrets",
     timeoutMs: 15,
     resolveHost: () => new Promise(() => {}),
   });
-  await assert.rejects(
-    f.service.verify(f.account),
-    /Mailbox connection timed out/,
-  );
+  await assert.rejects(f.service.verify(f.account), /Mailbox connection timed out/);
   assert.equal(f.service.jobs.size, 0);
   await f.service.close();
 });
@@ -174,131 +164,211 @@ test("watcher emits only mailbox-level change hints and stops them after stop", 
 });
 
 test("watcher retries after database outage instead of remaining stranded", async () => {
-  const f = fixture({retryMs:5});
+  const f = fixture({ retryMs: 5 });
   try {
     await f.service.start(f.account);
     const active = f.service.active.bind(f.service);
-    let attempts=0;
-    f.service.active=async id=>{ if(++attempts<=2) throw Error('database unavailable'); return active(id); };
+    let attempts = 0;
+    f.service.active = async (id) => {
+      if (++attempts <= 2) throw Error("database unavailable");
+      return active(id);
+    };
     f.client.close();
-    const deadline=Date.now()+1000;
-    while(f.service.state('a').connectionStatus!=='listening' && Date.now()<deadline) await new Promise(r=>setTimeout(r,5));
-    assert.ok(attempts>=3);
-    assert.equal(f.service.state('a').connectionStatus,'listening');
-    assert.equal(f.service.state('a').disconnectedSince,null);
-  } finally {await f.service.close();}
+    const deadline = Date.now() + 1000;
+    while (f.service.state("a").connectionStatus !== "listening" && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, 5));
+    assert.ok(attempts >= 3);
+    assert.equal(f.service.state("a").connectionStatus, "listening");
+    assert.equal(f.service.state("a").disconnectedSince, null);
+  } finally {
+    await f.service.close();
+  }
 });
 
-test('stopping a watcher during its initial change callback cannot report listening afterward', async () => {
+test("stopping a watcher during its initial change callback cannot report listening afterward", async () => {
   let release, entered;
-  const waiting = new Promise(resolve => {entered=resolve;});
-  const f = fixture({onChange:()=>new Promise(resolve=>{release=resolve;entered();})});
-  const starting=f.service.start(f.account);
+  const waiting = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const f = fixture({
+    onChange: () =>
+      new Promise((resolve) => {
+        release = resolve;
+        entered();
+      }),
+  });
+  const starting = f.service.start(f.account);
   try {
     await waiting;
-    f.service.stop('a');
+    f.service.stop("a");
     release();
     await starting;
-    assert.equal(f.service.state('a').connectionStatus,'stopped');
-    assert.equal(f.service.jobs.size,0);
-  } finally {release?.();await starting;await f.service.close();}
+    assert.equal(f.service.state("a").connectionStatus, "stopped");
+    assert.equal(f.service.jobs.size, 0);
+  } finally {
+    release?.();
+    await starting;
+    await f.service.close();
+  }
 });
-
 
 test("only an inbox count increase emits a new mail alert", async () => {
   const kinds = [];
-  const f = fixture({ onChange: (id, kind = 'sync') => kinds.push(kind) });
+  const f = fixture({ onChange: (id, kind = "sync") => kinds.push(kind) });
   try {
     await f.service.start(f.account);
     for (const [event, detail] of [
-      ['exists', { path: 'INBOX', prevCount: 2, count: 3 }],
-      ['flags', { path: 'INBOX' }], ['expunge', { path: 'INBOX' }],
-      ['exists', { path: 'INBOX', prevCount: 3, count: 3 }],
-      ['exists', { path: 'Sent', prevCount: 2, count: 3 }],
+      ["exists", { path: "INBOX", prevCount: 2, count: 3 }],
+      ["flags", { path: "INBOX" }],
+      ["expunge", { path: "INBOX" }],
+      ["exists", { path: "INBOX", prevCount: 3, count: 3 }],
+      ["exists", { path: "Sent", prevCount: 2, count: 3 }],
     ]) {
       f.client.emit(event, detail);
       await Promise.all([...f.service.background]);
     }
-    assert.deepEqual(kinds, ['sync','new_mail','sync','sync','sync','sync']);
-  } finally { await f.service.close(); }
+    assert.deepEqual(kinds, ["sync", "new_mail", "sync", "sync", "sync", "sync"]);
+  } finally {
+    await f.service.close();
+  }
 });
 
-
-test('notification preview fetches envelope only and excludes body', async () => {
-  const changes=[]; const f=fixture({needsPreview:async()=>true,onChange:(...args)=>changes.push(args)});
+test("notification preview fetches envelope only and excludes body", async () => {
+  const changes = [];
+  const f = fixture({ needsPreview: async () => true, onChange: (...args) => changes.push(args) });
   try {
     await f.service.start(f.account);
-    f.client.fetchOne=async(range,query)=>{
-      assert.equal(range,'*');assert.deepEqual(query,{envelope:true});
-      return {envelope:{from:[{name:'Sender',address:'sender@example.test'}],subject:'Subject'},source:'BODY NOT REQUESTED'};
+    f.client.fetchOne = async (range, query) => {
+      assert.equal(range, "*");
+      assert.deepEqual(query, { envelope: true });
+      return {
+        envelope: {
+          from: [{ name: "Sender", address: "sender@example.test" }],
+          subject: "Subject",
+        },
+        source: "BODY NOT REQUESTED",
+      };
     };
-    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    f.client.emit("exists", { path: "INBOX", prevCount: 2, count: 3 });
     await Promise.all([...f.service.background]);
-    assert.deepEqual(changes.at(-1),['a','new_mail',{sender:'Sender',subject:'Subject'}]);
-  } finally {await f.service.close();}
+    assert.deepEqual(changes.at(-1), ["a", "new_mail", { sender: "Sender", subject: "Subject" }]);
+  } finally {
+    await f.service.close();
+  }
 });
 
-
-test('no preview recipient means no envelope read or plaintext metadata', async () => {
-  const changes=[]; const f=fixture({onChange:(...args)=>changes.push(args)});
-  let reads=0;
+test("no preview recipient means no envelope read or plaintext metadata", async () => {
+  const changes = [];
+  const f = fixture({ onChange: (...args) => changes.push(args) });
+  let reads = 0;
   try {
     await f.service.start(f.account);
-    f.client.fetchOne=async()=>{reads++;return {envelope:{subject:'private'}};};
-    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    f.client.fetchOne = async () => {
+      reads++;
+      return { envelope: { subject: "private" } };
+    };
+    f.client.emit("exists", { path: "INBOX", prevCount: 2, count: 3 });
     await Promise.all([...f.service.background]);
-    assert.equal(reads,0);
-    assert.deepEqual(changes.at(-1),['a','new_mail',undefined]);
-  } finally {await f.service.close();}
+    assert.equal(reads, 0);
+    assert.deepEqual(changes.at(-1), ["a", "new_mail", undefined]);
+  } finally {
+    await f.service.close();
+  }
 });
 
-test('envelope timeout delivers generic alert before reconnecting', async () => {
-  const changes=[]; const f=fixture({timeoutMs:10,needsPreview:async()=>true,onChange:(...args)=>changes.push(args)});
-  try {
-    await f.service.start(f.account); changes.length=0;
-    f.client.fetchOne=()=>new Promise(()=>{});
-    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
-    await Promise.all([...f.service.background]);
-    assert.deepEqual(changes,[['a','new_mail',undefined]]);
-    assert.equal(f.service.state('a').connectionStatus,'reconnecting');
-  } finally {await f.service.close();}
-});
-
-test('stopping during envelope read suppresses timeout fallback', async () => {
-  const changes=[]; let started;
-  const ready=new Promise(resolve=>started=resolve);
-  const f=fixture({timeoutMs:10,needsPreview:async()=>true,onChange:(...args)=>changes.push(args)});
-  try {
-    await f.service.start(f.account); changes.length=0;
-    f.client.fetchOne=()=>{started();return new Promise(()=>{});};
-    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
-    await ready; f.service.stop('a');
-    await Promise.all([...f.service.background]);
-    assert.deepEqual(changes,[]);
-  } finally {await f.service.close();}
-});
-
-
-test('preview lookup failure skips content and preserves generic notification', async () => {
-  const changes=[];const f=fixture({needsPreview:async()=>{throw Error('unavailable');},onChange:(...args)=>changes.push(args)});
-  let reads=0;
+test("envelope timeout delivers generic alert before reconnecting", async () => {
+  const changes = [];
+  const f = fixture({
+    timeoutMs: 10,
+    needsPreview: async () => true,
+    onChange: (...args) => changes.push(args),
+  });
   try {
     await f.service.start(f.account);
-    f.client.fetchOne=async()=>{reads++;};
-    f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
+    changes.length = 0;
+    f.client.fetchOne = () => new Promise(() => {});
+    f.client.emit("exists", { path: "INBOX", prevCount: 2, count: 3 });
     await Promise.all([...f.service.background]);
-    assert.equal(reads,0);
-    assert.deepEqual(changes.at(-1),['a','new_mail',undefined]);
-  } finally {await f.service.close();}
+    assert.deepEqual(changes, [["a", "new_mail", undefined]]);
+    assert.equal(f.service.state("a").connectionStatus, "reconnecting");
+  } finally {
+    await f.service.close();
+  }
 });
 
+test("stopping during envelope read suppresses timeout fallback", async () => {
+  const changes = [];
+  let started;
+  const ready = new Promise((resolve) => (started = resolve));
+  const f = fixture({
+    timeoutMs: 10,
+    needsPreview: async () => true,
+    onChange: (...args) => changes.push(args),
+  });
+  try {
+    await f.service.start(f.account);
+    changes.length = 0;
+    f.client.fetchOne = () => {
+      started();
+      return new Promise(() => {});
+    };
+    f.client.emit("exists", { path: "INBOX", prevCount: 2, count: 3 });
+    await ready;
+    f.service.stop("a");
+    await Promise.all([...f.service.background]);
+    assert.deepEqual(changes, []);
+  } finally {
+    await f.service.close();
+  }
+});
 
-test('independent mailbox IDLE wakes sync without sending a direct notification',async()=>{
- const changes=[],wakes=[];const f=fixture({onChange:(...args)=>changes.push(args),onSyncChange:id=>wakes.push(id)});
- try {
-  f.account.sync_enabled=1;await f.service.start(f.account);changes.length=0;
-  f.client.emit('exists',{path:'INBOX',prevCount:2,count:3});
-  await Promise.all([...f.service.background]);
-  assert.deepEqual(changes,[]);assert.deepEqual(wakes,['a']);
- }finally{await f.service.close();}
+test("preview lookup failure skips content and preserves generic notification", async () => {
+  const changes = [];
+  const f = fixture({
+    needsPreview: async () => {
+      throw Error("unavailable");
+    },
+    onChange: (...args) => changes.push(args),
+  });
+  let reads = 0;
+  try {
+    await f.service.start(f.account);
+    f.client.fetchOne = async () => {
+      reads++;
+    };
+    f.client.emit("exists", { path: "INBOX", prevCount: 2, count: 3 });
+    await Promise.all([...f.service.background]);
+    assert.equal(reads, 0);
+    assert.deepEqual(changes.at(-1), ["a", "new_mail", undefined]);
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("independent mailbox IDLE wakes sync without sending a direct notification", async () => {
+  const changes = [],
+    wakes = [];
+  const f = fixture({
+    onChange: (...args) => changes.push(args),
+    onSyncChange: (id) => wakes.push(id),
+  });
+  try {
+    f.account.sync_enabled = 1;
+    await f.service.start(f.account);
+    changes.length = 0;
+    f.client.emit("exists", { path: "INBOX", prevCount: 2, count: 3 });
+    await Promise.all([...f.service.background]);
+    assert.deepEqual(changes, []);
+    assert.deepEqual(wakes, ["a"]);
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("a fixed active-account lookup replaces the database query", async () => {
+  const account = { id: "a" };
+  const service = new MailService({ active: async (id) => (id === "a" ? account : undefined) });
+  assert.equal(await service.active("a"), account);
+  assert.equal(await service.active("b"), undefined);
+  await service.close();
 });

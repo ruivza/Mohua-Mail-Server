@@ -147,3 +147,10 @@ CREATE TABLE IF NOT EXISTS mailbox_writebacks(
  message_id TEXT NOT NULL REFERENCES archive_messages(id) ON DELETE CASCADE,action TEXT NOT NULL,destination TEXT,
  state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_at BIGINT NOT NULL DEFAULT 0
 );
+
+-- Referencing-side indexes for foreign keys and account cleanup. Without them every deleted
+-- archive message scans both link tables, and large mailbox purges exceed statement_timeout.
+CREATE INDEX IF NOT EXISTS source_links_message ON mailbox_source_links(message_id) WHERE message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS writebacks_message ON mailbox_writebacks(message_id);
+CREATE INDEX IF NOT EXISTS device_mailboxes_account ON device_mailboxes(account_id);
+CREATE INDEX IF NOT EXISTS outbox_account ON outbox(account_id);

@@ -105,10 +105,7 @@ test("stream two attachments, omit Bcc header, pin TLS and deduplicate submissio
   const f = await fixture();
   try {
     const p = await f.sender.prepare(f.account, "u", "same", input);
-    assert.equal(
-      (await f.sender.prepare(f.account, "u", "same", input)).id,
-      p.id,
-    );
+    assert.equal((await f.sender.prepare(f.account, "u", "same", input)).id, p.id);
     await assert.rejects(
       async () =>
         await f.sender.prepare(f.account, "u", "same", {
@@ -120,12 +117,7 @@ test("stream two attachments, omit Bcc header, pin TLS and deduplicate submissio
     await assert.rejects(async () => await f.sender.status(p.id, "other"), {
       status: 404,
     });
-    const r = await f.sender.submit(
-      p.id,
-      "u",
-      Readable.from(["ab", "cdefg"]),
-      () => {},
-    );
+    const r = await f.sender.submit(p.id, "u", Readable.from(["ab", "cdefg"]), () => {});
     assert.equal(r.state, "sent");
     const parsed = await simpleParser(f.raw);
     assert.equal(parsed.text.trim(), "Message body");
@@ -158,15 +150,8 @@ test("reply threading, forward original and exact sent copy", async () => {
       const parsed = await simpleParser(f.raw);
       if (kind === "reply") {
         assert.equal(parsed.inReplyTo, "<original@example.com>");
-        assert.deepEqual(parsed.references, [
-          "<root@example.com>",
-          "<original@example.com>",
-        ]);
-      } else
-        assert.match(
-          parsed.attachments[0].content.toString(),
-          /forwarded original/,
-        );
+        assert.deepEqual(parsed.references, ["<root@example.com>", "<original@example.com>"]);
+      } else assert.match(parsed.attachments[0].content.toString(), /forwarded original/);
     }
   } finally {
     await f.close();
@@ -199,10 +184,7 @@ test("ambiguous SMTP failure is never automatically resent; copy failure remains
     });
     r = await f.sender.submit(p.id, "u", Readable.from([]), () => {});
     assert.equal(r.state, "unknown");
-    assert.equal(
-      (await f.sender.submit(p.id, "u", Readable.from([]), () => {})).state,
-      "unknown",
-    );
+    assert.equal((await f.sender.submit(p.id, "u", Readable.from([]), () => {})).state, "unknown");
   } finally {
     await f.close();
   }
@@ -239,9 +221,7 @@ test("restart marks in-flight sends uncertain and expires prepared content", asy
   const f = await fixture();
   try {
     const p = await f.sender.prepare(f.account, "u", "restart", input);
-    await f.db
-      .prepare("UPDATE outbox SET state='sending' WHERE id=?")
-      .run(p.id);
+    await f.db.prepare("UPDATE outbox SET state='sending' WHERE id=?").run(p.id);
     await f.sender.close();
     const next = new MailSender({ mail: f.mail, reader: {}, db: f.db });
     await next.initialize();
@@ -282,10 +262,7 @@ test("revocation blocks submission, partial acceptance stays partial and failed 
       ...input,
       attachments: [],
     });
-    assert.equal(
-      (await f.sender.submit(p.id, "u", Readable.from([]), () => {})).state,
-      "partial",
-    );
+    assert.equal((await f.sender.submit(p.id, "u", Readable.from([]), () => {})).state, "partial");
   } finally {
     await f.close();
   }
@@ -306,15 +283,10 @@ test("concurrent prepare is idempotent and simultaneous uploads cannot send twic
       ),
     );
     assert.equal(new Set(prepared.map((p) => p.id)).size, 1);
-    const sending = f.sender.submit(
-      prepared[0].id,
-      "u",
-      Readable.from([]),
-      async () => {
-        entered();
-        await gate;
-      },
-    );
+    const sending = f.sender.submit(prepared[0].id, "u", Readable.from([]), async () => {
+      entered();
+      await gate;
+    });
     await ready;
     await assert.rejects(
       f.sender.submit(prepared[0].id, "u", Readable.from([]), () => {}),
@@ -327,4 +299,61 @@ test("concurrent prepare is idempotent and simultaneous uploads cannot send twic
     release?.();
     await f.close();
   }
+});
+
+test("send limits apply per user under a larger process-wide ceiling", async () => {
+  const f = await fixture();
+  let release, entered;
+  const gate = new Promise((r) => (release = r)),
+    ready = new Promise((r) => (entered = r));
+  try {
+    assert.deepEqual(f.sender.limits, {
+      maxActivePerUser: 1,
+      maxActive: 8,
+      maxPendingPerUser: 4,
+      maxPending: 128,
+    });
+    const prepare = (user, key) =>
+      f.sender.prepare(f.account, user, key, { ...input, attachments: [] });
+    const own = [];
+    for (let i = 0; i < 4; i++) own.push(await prepare("u", "u" + i));
+    await assert.rejects(prepare("u", "u4"), { status: 429 });
+    const other = await prepare("v", "v0");
+    f.sender.limits.maxPending = 5;
+    await assert.rejects(prepare("w", "w0"), { status: 429 });
+    const sending = f.sender.submit(own[0].id, "u", Readable.from([]), async () => {
+      entered();
+      await gate;
+    });
+    await ready;
+    await assert.rejects(
+      f.sender.submit(own[1].id, "u", Readable.from([]), () => {}),
+      { status: 429 },
+    );
+    f.sender.limits.maxActive = 1;
+    await assert.rejects(
+      f.sender.submit(other.id, "v", Readable.from([]), () => {}),
+      { status: 429 },
+    );
+    f.sender.limits.maxActive = 8;
+    assert.equal((await f.sender.submit(other.id, "v", Readable.from([]), () => {})).state, "sent");
+    release();
+    assert.equal((await sending).state, "sent");
+  } finally {
+    release?.();
+    await f.close();
+  }
+});
+
+test("upload parts slice request buffers without copying them", async () => {
+  const chunk = Buffer.alloc(10000, 97);
+  const p = uploadParts(Readable.from([chunk]), [
+    { filename: "a", size: 3 },
+    { filename: "b", size: 9997 },
+  ]);
+  const pieces = [];
+  for (const part of p.parts) for await (const piece of part.content) pieces.push(piece);
+  assert.equal(Buffer.concat(pieces).length, 10000);
+  assert.ok(pieces.every((piece) => piece.buffer === chunk.buffer));
+  await p.finish();
 });

@@ -1,0 +1,15 @@
+# Dependencies, build output, release archives and local data
+node_modules/
+dist/
+releases/
+data/
+backups/
+package-lock.json
+
+# Binary assets
+docs/screenshots/
+public/mohua.jpg
+public/favicon.png
+
+# Prose stays hand-formatted: long Chinese paragraphs and aligned API tables.
+*.md

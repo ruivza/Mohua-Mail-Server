@@ -1,12 +1,17 @@
 import { encryptNotification, notificationAlgorithm } from "./notification-crypto.js";
-import { GatewaySettings, GatewayProvider } from "./gateway.js";
+import { GatewaySettings, GatewayProvider, gatewayProtocols } from "./gateway.js";
+import { SECOND, MINUTE, HOUR, DAY } from "./limits.js";
 
 // Honor bounded Retry-After values without accepting negative, infinite or invalid delays.
 export function retryAfterMs(value, now = Date.now()) {
-  if (typeof value !== 'string' && typeof value !== 'number') return 0;
+  if (typeof value !== "string" && typeof value !== "number") return 0;
   const text = String(value).trim();
-  const delay = /^\d+$/.test(text) ? Number(text) * 1000 : /^[A-Za-z]{3},/.test(text) ? Date.parse(text) - now : 0;
-  return Number.isFinite(delay) ? Math.max(0, Math.min(86400000, delay)) : 0;
+  const delay = /^\d+$/.test(text)
+    ? Number(text) * SECOND
+    : /^[A-Za-z]{3},/.test(text)
+      ? Date.parse(text) - now
+      : 0;
+  return Number.isFinite(delay) ? Math.max(0, Math.min(DAY, delay)) : 0;
 }
 
 // One durable, coalesced hint per device. Preview content is stored only as ciphertext.
@@ -18,9 +23,9 @@ export class PushService {
     transport,
     provider,
     now = Date.now,
-    intervalMs = 20 * 60000,
-    alertIntervalMs = 60000,
-    coalesceMs = 5000,
+    intervalMs = 20 * MINUTE,
+    alertIntervalMs = MINUTE,
+    coalesceMs = 5 * SECOND,
     autoStart = true,
     random = Math.random,
   }) {
@@ -34,20 +39,20 @@ export class PushService {
     if (this.autoStart) {
       this.timer = setInterval(() => {
         void this.flush();
-      }, 1000);
+      }, SECOND);
       this.timer.unref();
     }
   }
   async status(device) {
     if (!device?.push_enabled) return "device_disabled";
-    if ((await this.settings.current()).mode === "disabled")
-      return "server_disabled";
-    if (!(await this.settings.current()).gatewayUrl) return "not_configured";
+    const settings = await this.settings.current();
+    if (settings.mode === "disabled") return "server_disabled";
+    if (!settings.gatewayUrl) return "not_configured";
     if (!device?.push_credential) return "not_registered";
     return device.push_error || "ready";
   }
   async configure(input) {
-    const previous = (await this.settings.current()).revision;
+    const previous = (await this.settings.current(true)).revision;
     const result = await this.settings.configure(input);
     if (previous !== result.revision) this.provider.close();
     return result;
@@ -60,38 +65,74 @@ export class PushService {
       });
     if (input.revision !== settings.revision)
       throw Object.assign(Error("Push gateway changed"), { status: 409 });
-    const result = await this.provider.validate(device, input.credential, input.alertsEnabled === true ? "new_mail" : "sync");
+    const result = await this.provider.validate(
+      device,
+      input.credential,
+      input.alertsEnabled === true ? "new_mail" : "sync",
+    );
     if (result.status !== 200)
       throw Object.assign(Error("Gateway credential rejected"), {
-        status: result.status === 429 ? 429 : result.status >= 500 || result.status === 0 ? 503 : 400,
-        retryAfter: Math.ceil(Math.max(60000, retryAfterMs(result.retryAfter, this.now())) / 1000),
+        status:
+          result.status === 429 ? 429 : result.status >= 500 || result.status === 0 ? 503 : 400,
+        retryAfter: Math.ceil(
+          Math.max(MINUTE, retryAfterMs(result.retryAfter, this.now())) / SECOND,
+        ),
       });
-    if (input.revision !== (await this.settings.current()).revision)
+    if (input.revision !== (await this.settings.current(true)).revision)
       throw Object.assign(Error("Push gateway changed"), { status: 409 });
   }
   async test() {
     const config = await this.settings.current();
-    if (!config.gatewayUrl)
-      return { reachable: false, ready: false, reason: "未启用或未配置网关" };
+    if (!config.gatewayUrl) return { reachable: false, ready: false, reason: "未启用或未配置网关" };
     const revision = config.revision;
     const result = await this.provider.health();
-    if (revision !== (await this.settings.current()).revision)
+    if (revision !== (await this.settings.current(true)).revision)
       throw Object.assign(Error("Push gateway changed"), { status: 409 });
-    const compatible = result.status === 200 && result.body?.protocol === 1;
+    this.statusCache = { revision, at: this.now(), result };
+    const protocols = result.status === 200 ? gatewayProtocols(result.body) : [];
+    const compatible = protocols.length > 0;
     return {
       reachable: compatible,
       ready: compatible && result.body?.ready === true,
+      protocols,
       reason: compatible
         ? result.body?.ready === true
           ? "网关可用；设备送达需由客户端验证"
-          : "网关在线，但推送服务尚未就绪"
-        : "无法连接兼容的推送网关",
+          : "网关在线，但推送服务尚未就绪（请确认网关已创建应用 " + config.appId + "）"
+        : result.status === 200
+          ? "网关协议版本不兼容"
+          : "无法连接兼容的推送网关",
     };
   }
-  async capabilities() {
+  // Clients fetch their push configuration often; reuse a gateway status for a minute per revision.
+  async gatewayStatus() {
+    const revision = (await this.settings.current()).revision,
+      cached = this.statusCache;
+    if (
+      cached?.revision === revision &&
+      this.now() - cached.at < (cached.result.status === 200 ? MINUTE : 10 * SECOND)
+    )
+      return cached.result;
     const result = await this.provider.health();
-    const supported = result.status === 200 && result.body?.kinds?.includes("encrypted_alert") && result.body?.notificationEncryption === notificationAlgorithm;
-    return {kinds:supported ? ['sync','encrypted_alert'] : ['sync'], notificationEncryption:supported ? notificationAlgorithm : null};
+    this.statusCache = { revision, at: this.now(), result };
+    return result;
+  }
+  async capabilities() {
+    const result = await this.gatewayStatus();
+    const ok = result.status === 200;
+    const protocols = ok ? gatewayProtocols(result.body) : [];
+    const supported =
+      ok &&
+      protocols.length > 0 &&
+      result.body?.kinds?.includes("encrypted_alert") &&
+      result.body?.notificationEncryption === notificationAlgorithm;
+    return {
+      kinds: supported ? ["sync", "encrypted_alert"] : ["sync"],
+      notificationEncryption: supported ? notificationAlgorithm : null,
+      // Updated clients register with the newest protocol both sides support; older ones keep protocol 1.
+      gatewayProtocols: protocols,
+      registrationProtocol: protocols.length ? Math.max(...protocols) : null,
+    };
   }
   async recipientDevices(account) {
     if (!(await this.settings.current()).gatewayUrl || this.closed) return [];
@@ -106,10 +147,17 @@ export class PushService {
       .all(account, this.now());
   }
   async needsPreview(account) {
-    return (await this.recipientDevices(account)).some(device => device.push_alerts && device.notification_key);
+    return (await this.recipientDevices(account)).some(
+      (device) => device.push_alerts && device.notification_key,
+    );
   }
   async enqueue(account, kind = "sync", notification) {
-    for (const device of await this.recipientDevices(account)) await this.schedule(device, kind === "new_mail" && device.push_alerts ? "new_mail" : "sync", notification);
+    for (const device of await this.recipientDevices(account))
+      await this.schedule(
+        device,
+        kind === "new_mail" && device.push_alerts ? "new_mail" : "sync",
+        notification,
+      );
   }
   async schedule(device, kind = "sync", notification) {
     return this.db.transaction(async () => {
@@ -124,17 +172,20 @@ export class PushService {
     });
   }
   async scheduleLocked(device, kind, notification) {
-    if (
-      !(await this.settings.current()).gatewayUrl ||
-      !device.push_credential ||
-      !device.push_enabled
-    )
-      return;
-    const now = this.now();
     const config = await this.settings.current();
-    const encrypted = kind === 'new_mail' && notification && device.notification_key
-      ? JSON.stringify(encryptNotification(JSON.parse(device.notification_key), notification,
-        {appId:config.appId,deviceId:device.id,serverId:config.serverId}, now)) : null;
+    if (!config.gatewayUrl || !device.push_credential || !device.push_enabled) return;
+    const now = this.now();
+    const encrypted =
+      kind === "new_mail" && notification && device.notification_key
+        ? JSON.stringify(
+            encryptNotification(
+              JSON.parse(device.notification_key),
+              notification,
+              { appId: config.appId, deviceId: device.id, serverId: config.serverId },
+              now,
+            ),
+          )
+        : null;
     await this.db
       .prepare(
         `INSERT INTO push_jobs(device_id,next_at,expires,kind,alert_generation,notification) VALUES(?,?,?,?,?,?)
@@ -148,10 +199,11 @@ export class PushService {
         device.id,
         Math.max(
           now + this.coalesceMs,
-          (device.push_last_sent || 0) + (kind === "new_mail" ? this.alertIntervalMs : this.intervalMs),
+          (device.push_last_sent || 0) +
+            (kind === "new_mail" ? this.alertIntervalMs : this.intervalMs),
           device.push_not_before || 0,
         ),
-        now + 86400000,
+        now + DAY,
         kind,
         kind === "new_mail" ? 1 : 0,
         encrypted,
@@ -186,9 +238,7 @@ export class PushService {
   }
   async deliver() {
     const jobs = await this.db
-      .prepare(
-        "SELECT * FROM push_jobs WHERE next_at<=? ORDER BY next_at LIMIT 20",
-      )
+      .prepare("SELECT * FROM push_jobs WHERE next_at<=? ORDER BY next_at LIMIT 20")
       .all(this.now());
     let next = 0;
     // Refill each slot as soon as its request completes; keep one job per device.
@@ -197,8 +247,11 @@ export class PushService {
     const worker = async () => {
       while (!this.closed && !failure && next < jobs.length) {
         const job = jobs[next++];
-        try { await this.deliverJob(job); }
-        catch (error) { failure = error; }
+        try {
+          await this.deliverJob(job);
+        } catch (error) {
+          failure = error;
+        }
       }
     };
     await Promise.all(Array.from({ length: Math.min(4, jobs.length) }, worker));
@@ -218,20 +271,18 @@ export class PushService {
         device,
         this.decrypt(device.push_credential),
         job.kind === "new_mail" && device.push_alerts ? "new_mail" : "sync",
-        job.kind === "new_mail" && device.push_alerts && job.notification ? JSON.parse(job.notification) : undefined,
+        job.kind === "new_mail" && device.push_alerts && job.notification
+          ? JSON.parse(job.notification)
+          : undefined,
       );
     } catch {
       result = { status: 0 };
     }
     await this.db.transaction(async () => {
       if (this.closed) return;
-      await this.db
-        .prepare("SELECT id FROM push_settings WHERE id=1 FOR SHARE")
-        .get();
-      await this.db
-        .prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE")
-        .get(device.id);
-      if (revision !== (await this.settings.current()).revision) return;
+      await this.db.prepare("SELECT id FROM push_settings WHERE id=1 FOR SHARE").get();
+      await this.db.prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE").get(device.id);
+      if (revision !== (await this.settings.current(true)).revision) return;
       // A late rejection of an old registration cannot invalidate a newly registered token.
       const current = await this.eligible(device.id);
       if (!current) {
@@ -252,7 +303,14 @@ export class PushService {
           .prepare(
             "UPDATE push_jobs SET next_at=CASE WHEN kind='new_mail' AND alert_generation>? THEN CAST(? AS BIGINT) ELSE CAST(? AS BIGINT) END,attempts=0,kind=CASE WHEN kind='new_mail' AND alert_generation<=? THEN 'sync' ELSE kind END,notification=CASE WHEN alert_generation<=? THEN NULL ELSE notification END WHERE device_id=?",
           )
-          .run(job.generation, this.now() + this.alertIntervalMs, this.now() + this.intervalMs, job.generation, job.generation, device.id);
+          .run(
+            job.generation,
+            this.now() + this.alertIntervalMs,
+            this.now() + this.intervalMs,
+            job.generation,
+            job.generation,
+            device.id,
+          );
         return;
       }
       const invalid =
@@ -283,14 +341,13 @@ export class PushService {
         invalid;
       const attempts = job.attempts + 1;
       const exhausted = attempts >= 8;
-      const delay = Math.max(
-        !retry || exhausted ? 3600000 : Math.min(3600000, 60000 * 2 ** (attempts - 1)),
-        retryAfterMs(result.retryAfter, this.now()),
-      ) + Math.floor(this.random() * 5000);
+      const delay =
+        Math.max(
+          !retry || exhausted ? HOUR : Math.min(HOUR, MINUTE * 2 ** (attempts - 1)),
+          retryAfterMs(result.retryAfter, this.now()),
+        ) + Math.floor(this.random() * 5000);
       await this.db
-        .prepare(
-          "UPDATE client_devices SET push_error=?,push_not_before=? WHERE id=?",
-        )
+        .prepare("UPDATE client_devices SET push_error=?,push_not_before=? WHERE id=?")
         .run(
           result.status === 403
             ? "configuration_error"
@@ -307,9 +364,7 @@ export class PushService {
         return;
       }
       await this.db
-        .prepare(
-          "UPDATE push_jobs SET attempts=?,next_at=? WHERE device_id=?",
-        )
+        .prepare("UPDATE push_jobs SET attempts=?,next_at=? WHERE device_id=?")
         .run(attempts, this.now() + delay, device.id);
     });
   }

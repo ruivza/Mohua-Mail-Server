@@ -16,5 +16,6 @@ CMD ["node","src/server.js"]
 FROM dependencies AS test
 COPY src ./src
 COPY public ./public
+COPY ops ./ops
 COPY test ./test
 CMD ["npm","test"]

@@ -59,10 +59,14 @@ test("HTML alternative is preferred and inline CID parts retain stable attachmen
 test("a lone named HTML part remains readable as the message body", () => {
   const parts = splitStructure({
     type: "multipart/mixed",
-    childNodes: [{
-      part: "1", type: "text/html", disposition: "attachment",
-      dispositionParameters: { filename: "message.html" },
-    }],
+    childNodes: [
+      {
+        part: "1",
+        type: "text/html",
+        disposition: "attachment",
+        dispositionParameters: { filename: "message.html" },
+      },
+    ],
   });
   assert.equal(parts.body.part, "1");
   assert.deepEqual(parts.attachments, []);
@@ -76,7 +80,10 @@ test("a named HTML body keeps separate inline images available", () => {
     ],
   });
   assert.equal(parts.body.part, "1");
-  assert.deepEqual(parts.attachments.map((part) => part.part), ["2"]);
+  assert.deepEqual(
+    parts.attachments.map((part) => part.part),
+    ["2"],
+  );
 });
 function fixture() {
   let closed = 0;
@@ -161,52 +168,26 @@ test("direct mode and stale UIDVALIDITY are rejected", async () => {
   await assert.rejects(f.reader.folders({ ...f.account, mode: "direct" }), {
     status: 409,
   });
-  await assert.rejects(
-    f.reader.list(f.account, { validity: "999", limit: 2 }),
-    { status: 409 },
-  );
+  await assert.rejects(f.reader.list(f.account, { validity: "999", limit: 2 }), { status: 409 });
 });
 test("read text and download decoded MIME attachment without HTML rendering", async () => {
   const f = await fixture();
-  const message = await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    null,
-  );
+  const message = await f.reader.message(f.account, { validity: "123" }, 205, null);
   assert.equal(message.body.contentType, "text/plain");
   assert.equal(message.text, undefined);
   assert.equal(message.html, undefined);
   assert.equal(message.attachments[0].filename, "test.txt");
   let data = "";
-  await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    0,
-    null,
-    async (file) => {
-      for await (const chunk of file.content) data += chunk.toString();
-    },
-  );
+  await f.reader.message(f.account, { validity: "123" }, 205, 0, null, async (file) => {
+    for await (const chunk of file.content) data += chunk.toString();
+  });
   assert.match(data, /attachment bytes/);
 });
 test("large messages remain readable and missing parts fail safely", async () => {
   const f = await fixture();
-  await assert.rejects(
-    f.reader.message(f.account, { validity: "123" }, 99, null),
-    { status: 404 },
-  );
-  await assert.rejects(
-    f.reader.message(f.account, { validity: "123" }, 205, 9),
-    { status: 404 },
-  );
-  const result = await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    null,
-  );
+  await assert.rejects(f.reader.message(f.account, { validity: "123" }, 99, null), { status: 404 });
+  await assert.rejects(f.reader.message(f.account, { validity: "123" }, 205, 9), { status: 404 });
+  const result = await f.reader.message(f.account, { validity: "123" }, 205, null);
   assert.equal(result.body.contentType, "text/plain");
   assert.equal(result.attachments[0].size, 99 * 1024 * 1024);
 });
@@ -240,19 +221,12 @@ test("large attachment streams in bounded chunks without downloading body", asyn
     };
   };
   let received = 0;
-  await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    0,
-    null,
-    async (file) => {
-      for await (const chunk of file.content) {
-        assert.ok(chunk.length <= 65536);
-        received += chunk.length;
-      }
-    },
-  );
+  await f.reader.message(f.account, { validity: "123" }, 205, 0, null, async (file) => {
+    for await (const chunk of file.content) {
+      assert.ok(chunk.length <= 65536);
+      received += chunk.length;
+    }
+  });
   assert.equal(received, total);
   assert.equal(f.closed, 1);
 });
@@ -282,23 +256,11 @@ test("body streams beyond old limit and metadata never downloads body", async ()
       ),
     };
   };
-  const meta = await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    null,
-  );
+  const meta = await f.reader.message(f.account, { validity: "123" }, 205, null);
   assert.equal(meta.text, undefined);
-  await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    "body",
-    null,
-    async (file) => {
-      for await (const chunk of file.content) received += chunk.length;
-    },
-  );
+  await f.reader.message(f.account, { validity: "123" }, 205, "body", null, async (file) => {
+    for await (const chunk of file.content) received += chunk.length;
+  });
   assert.equal(received, 4 * 1024 * 1024);
 });
 
@@ -348,10 +310,7 @@ test("mail actions use UID flags and special-use folders, rejecting stale and un
     { status: 401 },
   );
   f.client.capabilities.clear();
-  await assert.rejects(
-    f.reader.mutate(f.account, o, 205, { action: "trash" }),
-    { status: 409 },
-  );
+  await assert.rejects(f.reader.mutate(f.account, o, 205, { action: "trash" }), { status: 409 });
   assert.equal(calls.length, 6);
 });
 
@@ -370,12 +329,7 @@ test("metadata reports authoritative flags without reading body", async () => {
     downloaded = true;
     throw Error("unexpected download");
   };
-  const result = await f.reader.message(
-    f.account,
-    { validity: "123" },
-    205,
-    null,
-  );
+  const result = await f.reader.message(f.account, { validity: "123" }, 205, null);
   assert.deepEqual(result.flags, ["\\Seen", "\\Flagged"]);
   assert.equal(downloaded, false);
 });
@@ -405,9 +359,7 @@ test("incremental sync bounds UID holes and fetches only flags for known message
     result.items.map((m) => m.uid),
     [1200, 1205],
   );
-  assert.deepEqual(result.existing, [
-    { uid: 99, flags: ["\\Seen", "\\Flagged"] },
-  ]);
+  assert.deepEqual(result.existing, [{ uid: 99, flags: ["\\Seen", "\\Flagged"] }]);
   assert.deepEqual(calls, [
     {
       range: "206:1205",
@@ -442,10 +394,7 @@ test("incremental sync rejects malformed cursors, changed epochs and regressed U
       status: 400,
     });
   }
-  await assert.rejects(
-    f.reader.sync(f.account, { ...input, uidValidity: "124" }),
-    { status: 409 },
-  );
+  await assert.rejects(f.reader.sync(f.account, { ...input, uidValidity: "124" }), { status: 409 });
   await assert.rejects(f.reader.sync(f.account, { ...input, after: 206 }), {
     status: 409,
   });
@@ -456,4 +405,66 @@ test("incremental sync rejects malformed cursors, changed epochs and regressed U
   assert.equal(unchanged.highWater, 205);
   assert.equal(unchanged.hasMore, false);
   assert.deepEqual(unchanged.existing, []);
+});
+
+test("list fetches about two pages of envelopes and widens only across UID holes", async () => {
+  const f = await fixture();
+  const ranges = [];
+  let uids = Array.from({ length: 1000 }, (_, i) => i + 1);
+  f.client.mailboxOpen = async () => ({ uidValidity: 123n, uidNext: 1001 });
+  f.client.fetchAll = async (range) => {
+    ranges.push(range);
+    const [lo, hi] = range.split(":").map(Number);
+    return uids
+      .filter((uid) => uid >= lo && uid <= hi)
+      .map((uid) => ({ uid, envelope: {}, flags: new Set(), size: 1 }));
+  };
+  let page = await f.reader.list(f.account, { limit: 25 });
+  assert.deepEqual(ranges, ["951:1000"]);
+  assert.equal(page.items.length, 25);
+  assert.equal(page.nextBefore, 976);
+  ranges.length = 0;
+  page = await f.reader.list(f.account, { limit: 50 });
+  assert.deepEqual(ranges, ["901:1000"]);
+  assert.equal(page.nextBefore, 951);
+  uids = [1000, 800, 700];
+  ranges.length = 0;
+  page = await f.reader.list(f.account, { limit: 25 });
+  assert.deepEqual(ranges, ["951:1000", "801:950"]);
+  assert.deepEqual(
+    page.items.map((m) => m.uid),
+    [1000],
+  );
+  assert.equal(page.nextBefore, 801);
+  ranges.length = 0;
+  page = await f.reader.list(f.account, {
+    limit: 25,
+    before: page.nextBefore,
+    validity: "123",
+  });
+  assert.deepEqual(ranges, ["751:800", "601:750"]);
+  assert.deepEqual(
+    page.items.map((m) => m.uid),
+    [800, 700],
+  );
+  assert.equal(page.nextBefore, 601);
+});
+
+test("mailbox reads are limited per user under a separate process-wide ceiling", async () => {
+  const f = await fixture();
+  assert.deepEqual(new MailReader(f.reader.mail).limits, {
+    maxJobsPerUser: 2,
+    maxJobs: 64,
+  });
+  const reader = new MailReader(f.reader.mail, { idleMs: 0, maxJobs: 3 });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const hold = (user) => reader.execute({ ...f.account, user_id: user }, null, () => gate);
+  const running = [hold("u"), hold("u")];
+  await assert.rejects(hold("u"), { status: 429 });
+  running.push(hold("v"));
+  await assert.rejects(hold("w"), { status: 429 });
+  release();
+  await Promise.all(running);
+  assert.equal(reader.jobs.size, 0);
 });

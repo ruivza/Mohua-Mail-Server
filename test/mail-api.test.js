@@ -37,17 +37,14 @@ test("mail API authenticates, updates secrets and closes workers on user disable
   });
   await new Promise((r) => app.server.listen(0, "127.0.0.1", r));
   const call = async (path, method = "GET", body, token) => {
-    const r = await fetch(
-      `http://127.0.0.1:${app.server.address().port}/api${path}`,
-      {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: "Bearer " + token } : {}),
-        },
-        body: body ? JSON.stringify(body) : undefined,
+    const r = await fetch(`http://127.0.0.1:${app.server.address().port}/api${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: "Bearer " + token } : {}),
       },
-    );
+      body: body ? JSON.stringify(body) : undefined,
+    });
     return { status: r.status, data: await r.json() };
   };
   try {
@@ -62,8 +59,7 @@ test("mail API authenticates, updates secrets and closes workers on user disable
         password: "long-password-123",
       })
     ).data;
-    const invite = (await call("/admin/invites", "POST", {}, admin.token)).data
-      .invite;
+    const invite = (await call("/admin/invites", "POST", {}, admin.token)).data.invite;
     await call("/register", "POST", {
       email: "user@example.com",
       password: "long-password-456",
@@ -89,51 +85,26 @@ test("mail API authenticates, updates secrets and closes workers on user disable
         user.token,
       )
     ).data.id;
-    assert.equal(
-      (await call(`/accounts/${id}/verify`, "POST", {}, admin.token)).status,
-      403,
-    );
+    assert.equal((await call(`/accounts/${id}/verify`, "POST", {}, admin.token)).status, 403);
     await authorizeFixture(app, id, "old-secret");
     assert.equal(
-      (await call(`/accounts/${id}/verify`, "POST", {}, user.token)).data
-        .connectionStatus,
+      (await call(`/accounts/${id}/verify`, "POST", {}, user.token)).data.connectionStatus,
       "verified",
     );
     assert.equal(
-      (
-        await call(
-          `/accounts/${id}`,
-          "PATCH",
-          clientCredential("new-secret", id),
-          user.token,
-        )
-      ).status,
+      (await call(`/accounts/${id}`, "PATCH", clientCredential("new-secret", id), user.token))
+        .status,
       200,
     );
     await authorizeFixture(app, id, "new-secret");
     await call(`/accounts/${id}/verify`, "POST", {}, user.token);
     assert.deepEqual(passwords, ["old-secret", "new-secret"]);
-    await call(
-      `/accounts/${id}/monitor`,
-      "POST",
-      { enabled: true },
-      user.token,
-    );
+    await call(`/accounts/${id}/monitor`, "POST", { enabled: true }, user.token);
     assert.equal(app.mail.jobs.size, 1);
-    await call(
-      `/admin/users/${user.user.id}`,
-      "PATCH",
-      { active: false },
-      admin.token,
-    );
+    await call(`/admin/users/${user.user.id}`, "PATCH", { active: false }, admin.token);
     assert.equal(app.mail.jobs.size, 0);
     assert.ok(closes >= 3);
-    await call(
-      `/admin/users/${user.user.id}`,
-      "PATCH",
-      { active: true },
-      admin.token,
-    );
+    await call(`/admin/users/${user.user.id}`, "PATCH", { active: true }, admin.token);
     assert.equal(app.mail.jobs.size, 0);
     const again = (
       await call("/client/login", "POST", {
@@ -141,15 +112,16 @@ test("mail API authenticates, updates secrets and closes workers on user disable
         password: "long-password-456",
       })
     ).data;
-    await call(`/accounts/${id}`, "DELETE", {email:"mail@example.com"}, again.token);
-    const pending=await app.db.prepare("SELECT credential,purge_after FROM accounts WHERE id=?").get(id);
-    assert.equal(pending.credential,null);assert.ok(pending.purge_after);
-    app.storage.now=()=>pending.purge_after;await app.storage.sweep();
+    await call(`/accounts/${id}`, "DELETE", { email: "mail@example.com" }, again.token);
+    const pending = await app.db
+      .prepare("SELECT credential,purge_after FROM accounts WHERE id=?")
+      .get(id);
+    assert.equal(pending.credential, null);
+    assert.ok(pending.purge_after);
+    app.storage.now = () => pending.purge_after;
+    await app.storage.sweep();
     assert.equal(app.mail.jobs.size, 0);
-    assert.equal(
-      (await app.db.prepare("SELECT COUNT(*) n FROM accounts").get()).n,
-      0,
-    );
+    assert.equal((await app.db.prepare("SELECT COUNT(*) n FROM accounts").get()).n, 0);
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });

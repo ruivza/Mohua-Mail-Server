@@ -29,7 +29,11 @@ test("resource history and manual diagnostics reject concurrent checks", async (
   try {
     assert.equal((await f.service.summary()).samples.length, 1);
     assert.equal((await f.service.summary()).settings, undefined);
-    assert.deepEqual(Object.keys((await f.service.summary()).samples[0]).sort(), ["at", "cpu", "memory"]);
+    assert.deepEqual(Object.keys((await f.service.summary()).samples[0]).sort(), [
+      "at",
+      "cpu",
+      "memory",
+    ]);
     await f.service.run();
     await assert.rejects(async () => await f.service.run(), /already running/);
     await ready;
@@ -38,9 +42,7 @@ test("resource history and manual diagnostics reject concurrent checks", async (
     const run = (await f.service.summary()).runs[0];
     assert.equal(run.status, "ok");
     assert.equal(run.stage, "imap_read");
-    assert.ok(
-      !JSON.stringify(await f.service.summary()).includes("encrypted:"),
-    );
+    assert.ok(!JSON.stringify(await f.service.summary()).includes("encrypted:"));
   } finally {
     await f.service.close();
     await f.db.close();
@@ -63,9 +65,7 @@ test("external failures remain distinct from application failures", async () => 
 test("shutdown aborts self-test; restart marks unfinished run unknown", async () => {
   const f = await make(
     async ({ signal }) =>
-      new Promise((_, reject) =>
-        signal.addEventListener("abort", () => reject(Error("aborted"))),
-      ),
+      new Promise((_, reject) => signal.addEventListener("abort", () => reject(Error("aborted")))),
   );
   await f.service.run();
   await f.service.close();
@@ -88,27 +88,38 @@ test("shutdown aborts self-test; restart marks unfinished run unknown", async ()
 
 test("diagnostics distinguish local permissions without exposing upstream secrets", () => {
   assert.equal(
-    describeProbeError({ code: "ESOCKET", errno: -4048, message: "secret" })
-      .status,
+    describeProbeError({ code: "ESOCKET", errno: -4048, message: "secret" }).status,
     "error",
   );
   assert.match(describeProbeError({ code: "EAUTH" }).detail, /EAUTH/);
   assert.ok(
-    !JSON.stringify(
-      describeProbeError({ code: "UNKNOWN", message: "password secret" }),
-    ).includes("secret"),
+    !JSON.stringify(describeProbeError({ code: "UNKNOWN", message: "password secret" })).includes(
+      "secret",
+    ),
   );
 });
 
-test('legacy scheduled self-tests no longer send mail during resource sampling', async () => {
+test("legacy scheduled self-tests no longer send mail during resource sampling", async () => {
   const db = await createTestDatabase();
-  let calls=0;
+  let calls = 0;
   await db.exec("INSERT INTO service_settings VALUES('enabled','true'),('interval','15')");
-  const service = new HealthService({db,seal:x=>x,decrypt:x=>x,mail:{closed:false},intervalMs:5,probe:async()=>{calls++;}});
+  const service = new HealthService({
+    db,
+    seal: (x) => x,
+    decrypt: (x) => x,
+    mail: { closed: false },
+    intervalMs: 5,
+    probe: async () => {
+      calls++;
+    },
+  });
   try {
     await service.initialize();
-    await new Promise(r=>setTimeout(r,35));
-    assert.equal(calls,0);
-    assert.equal((await db.prepare('SELECT count(*) n FROM health_probe').get()).n,0);
-  } finally {await service.close();await db.close();}
+    await new Promise((r) => setTimeout(r, 35));
+    assert.equal(calls, 0);
+    assert.equal((await db.prepare("SELECT count(*) n FROM health_probe").get()).n, 0);
+  } finally {
+    await service.close();
+    await db.close();
+  }
 });

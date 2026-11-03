@@ -23,8 +23,11 @@ const files = [
   ".env.example",
   ".dockerignore",
   ".gitignore",
+  ".prettierrc",
+  ".prettierignore",
   "APNS_SETUP_ZH.md",
   "GATEWAY_PROTOCOL.md",
+  "ENCRYPTED_NOTIFICATIONS.md",
   "scripts/export-server.mjs",
   "docs/SERVER_README.md",
   "docs/CLIENT_CREDENTIAL_LEASES.md",
@@ -35,7 +38,13 @@ const files = [
 ];
 rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });
-for (const file of files)
-  cpSync(resolve(root, file), resolve(target, file), { recursive: true });
-writeFileSync(resolve(target, "README.md"), readFileSync(resolve(root, "docs/SERVER_README.md"), "utf8").replaceAll("../SYNC_MODE_ZH.md", "SYNC_MODE_ZH.md"));
+for (const file of files) cpSync(resolve(root, file), resolve(target, file), { recursive: true });
+// The bundle README sits at the root while the other docs keep their docs/ paths.
+writeFileSync(
+  resolve(target, "README.md"),
+  readFileSync(resolve(root, "docs/SERVER_README.md"), "utf8")
+    .replaceAll("../SYNC_MODE_ZH.md", "SYNC_MODE_ZH.md")
+    .replaceAll("(CLIENT_CREDENTIAL_LEASES.md)", "(docs/CLIENT_CREDENTIAL_LEASES.md)")
+    .replaceAll("(MAIL_PROCESS_ISOLATION.md)", "(docs/MAIL_PROCESS_ISOLATION.md)"),
+);
 console.log("Open-source server files exported to dist/mohua-server/");

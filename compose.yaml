@@ -10,7 +10,7 @@ services:
     volumes:
       - mohua-postgres:/var/lib/postgresql
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U mohua -d mohua']
+      test: [CMD-SHELL, "pg_isready -U mohua -d mohua"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -30,6 +30,8 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Run node scripts/configure.mjs first}
       SETUP_TOKEN: ${SETUP_TOKEN:?Run node scripts/configure.mjs first}
       OFFICIAL_PUSH_GATEWAY_URL: ${OFFICIAL_PUSH_GATEWAY_URL:-}
+      PUSH_GATEWAY_APP_ID: ${PUSH_GATEWAY_APP_ID:-mohua}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
       GATEWAY_SERVER_CREDENTIAL: ${GATEWAY_SERVER_CREDENTIAL:-}
       GATEWAY_SERVER_CREDENTIAL_URL: ${GATEWAY_SERVER_CREDENTIAL_URL:-}
       MAIL_BROKER_TOKEN: ${MAIL_BROKER_TOKEN:?Run node scripts/configure.mjs first}
@@ -51,7 +53,13 @@ services:
     ulimits:
       core: 0
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:3210/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3210/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 15s
       timeout: 5s
       start_period: 20s
@@ -83,7 +91,13 @@ services:
     ulimits:
       core: 0
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:3211/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3211/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 5s
       timeout: 5s
       start_period: 20s
@@ -95,7 +109,7 @@ services:
     volumes:
       - ./ops/mail-edge.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - '${MOHUA_BIND_ADDRESS:-127.0.0.1}:${MOHUA_PORT:-3210}:8080'
+      - "${MOHUA_BIND_ADDRESS:-127.0.0.1}:${MOHUA_PORT:-3210}:8080"
     networks: [api, mail-front, edge-public]
     depends_on:
       server:

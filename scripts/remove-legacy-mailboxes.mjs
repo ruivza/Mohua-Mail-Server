@@ -4,4 +4,6 @@ const db = new Database();
 try {
   await db.claimOwner(() => {});
   console.log(JSON.stringify(await removeLegacyMailboxes(db)));
-} finally { await db.close(); }
+} finally {
+  await db.close();
+}

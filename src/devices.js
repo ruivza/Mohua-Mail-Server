@@ -1,10 +1,8 @@
 import { notificationKey } from "./notification-crypto.js";
 import { randomUUID } from "node:crypto";
 import { hashToken, newToken } from "./auth.js";
-
-const fail = (status, message) => {
-  throw Object.assign(new Error(message), { status });
-};
+import { fail } from "./errors.js";
+import { MAX_DEVICES_PER_USER, SESSION_TTL } from "./limits.js";
 
 export class DeviceService {
   constructor({ db, seal }) {
@@ -49,58 +47,50 @@ export class DeviceService {
         !active &&
         (
           await this.db
-            .prepare(
-              "SELECT COUNT(*) n FROM client_devices WHERE user_id=? AND revoked IS NULL",
-            )
+            .prepare("SELECT COUNT(*) n FROM client_devices WHERE user_id=? AND revoked IS NULL")
             .get(user)
-        ).n >= 20
+        ).n >= MAX_DEVICES_PER_USER
       ) {
-        fail(409, "Maximum 20 devices; revoke an existing device first");
+        fail(409, `Maximum ${MAX_DEVICES_PER_USER} devices; revoke an existing device first`);
       }
       const deviceId = active ? previous.id : randomUUID();
       const sessionId = randomUUID();
       const token = newToken();
-      const expires = Date.now() + 30 * 86400000;
+      const expires = Date.now() + SESSION_TTL;
       if (active) {
         await this.db
           .prepare(
             "DELETE FROM sessions WHERE id IN (SELECT session_id FROM device_sessions WHERE device_id=?)",
           )
           .run(deviceId);
-        await this.db
-          .prepare("UPDATE client_devices SET name=? WHERE id=?")
-          .run(name, deviceId);
+        await this.db.prepare("UPDATE client_devices SET name=? WHERE id=?").run(name, deviceId);
       } else {
         await this.db
-          .prepare(
-            "INSERT INTO client_devices(id,user_id,name,platform,created) VALUES(?,?,?,?,?)",
-          )
+          .prepare("INSERT INTO client_devices(id,user_id,name,platform,created) VALUES(?,?,?,?,?)")
           .run(deviceId, user, name, input.platform, Date.now());
       }
       await this.db
         .prepare("INSERT INTO sessions VALUES(?,?,?,?,?)")
         .run(sessionId, user, hashToken(token), name, expires);
-      await this.db
-        .prepare("INSERT INTO device_sessions VALUES(?,?)")
-        .run(sessionId, deviceId);
+      await this.db.prepare("INSERT INTO device_sessions VALUES(?,?)").run(sessionId, deviceId);
       return { deviceId, sessionId, token, expires };
     });
   }
 
-  async deviceForSession(session) {
-    return await this.db
+  // Ending a client session revokes its device, so the device's in-memory mailbox leases end with it.
+  async revokeSession(user, session) {
+    const owner = await this.db
       .prepare(
-        `SELECT d.* FROM client_devices d JOIN device_sessions s ON s.device_id=d.id
-      WHERE s.session_id=? AND d.revoked IS NULL`,
+        "SELECT ds.device_id FROM device_sessions ds JOIN sessions s ON s.id=ds.session_id WHERE s.id=? AND s.user_id=?",
       )
-      .get(session);
+      .get(session, user);
+    if (owner) return await this.revoke(user, owner.device_id);
+    await this.db.prepare("DELETE FROM sessions WHERE id=? AND user_id=?").run(session, user);
   }
 
   async own(user, id) {
     const device = await this.db
-      .prepare(
-        "SELECT * FROM client_devices WHERE id=? AND user_id=? AND revoked IS NULL",
-      )
+      .prepare("SELECT * FROM client_devices WHERE id=? AND user_id=? AND revoked IS NULL")
       .get(id, user);
     if (!device) fail(404, "Device not found");
     return device;
@@ -121,8 +111,7 @@ export class DeviceService {
         ...device,
         sessionActive: Boolean(device.sessionActive),
         pushStatus:
-          (await this.pushService?.status(await this.own(user, device.id))) ??
-          "not_configured",
+          (await this.pushService?.status(await this.own(user, device.id))) ?? "not_configured",
       })),
     );
   }
@@ -130,17 +119,13 @@ export class DeviceService {
   async revoke(user, id) {
     await this.own(user, id);
     const result = await this.db.transaction(async () => {
-      await this.db
-        .prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE")
-        .get(id);
+      await this.db.prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE").get(id);
       await this.db
         .prepare(
           "DELETE FROM sessions WHERE id IN (SELECT session_id FROM device_sessions WHERE device_id=?)",
         )
         .run(id);
-      await this.db
-        .prepare("DELETE FROM device_mailboxes WHERE device_id=?")
-        .run(id);
+      await this.db.prepare("DELETE FROM device_mailboxes WHERE device_id=?").run(id);
       await this.pushService?.remove(id);
       await this.db
         .prepare(
@@ -165,12 +150,7 @@ export class DeviceService {
   }
 
   async changed(account, kind = "sync", notification) {
-    if (
-      !(await this.db
-        .prepare("SELECT id FROM accounts WHERE id=?")
-        .get(account))
-    )
-      return;
+    if (!(await this.db.prepare("SELECT id FROM accounts WHERE id=?").get(account))) return;
     await this.db
       .prepare(
         `INSERT INTO mailbox_revisions VALUES(?,1)
@@ -201,12 +181,8 @@ export class DeviceService {
   }
 
   async ack(device, body) {
-    if (!Number.isSafeInteger(body.revision) || body.revision < 1)
-      fail(400, "Invalid revision");
-    if (
-      typeof body.accountId !== "string" ||
-      !(await this.allowed(device.id, body.accountId))
-    )
+    if (!Number.isSafeInteger(body.revision) || body.revision < 1) fail(400, "Invalid revision");
+    if (typeof body.accountId !== "string" || !(await this.allowed(device.id, body.accountId)))
       fail(404, "Mailbox not found");
     const revision =
       (
@@ -227,7 +203,8 @@ export class DeviceService {
   async push(device, body, sessionId) {
     if (!body || typeof body !== "object" || Array.isArray(body))
       fail(400, "Invalid gateway registration");
-    if (body.alertsEnabled !== undefined && typeof body.alertsEnabled !== "boolean") fail(400, "Invalid alert preference");
+    if (body.alertsEnabled !== undefined && typeof body.alertsEnabled !== "boolean")
+      fail(400, "Invalid alert preference");
     if (body.enabled === false || body.token === null) {
       await this.db.transaction(async () => {
         await this.db
@@ -245,12 +222,16 @@ export class DeviceService {
         await this.db.prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE").get(device.id);
         // Enabling alerts requires a validated mail-purpose credential. Disabling needs no grant.
         if (body.alertsEnabled === false) {
-          await this.db.prepare("UPDATE client_devices SET push_alerts=0,notification_key=NULL,push_registered=push_registered+1 WHERE id=? AND push_alerts<>0").run(device.id);
-          await this.db.prepare("UPDATE push_jobs SET kind='sync',notification=NULL WHERE device_id=?").run(device.id);
+          await this.db
+            .prepare(
+              "UPDATE client_devices SET push_alerts=0,notification_key=NULL,push_registered=push_registered+1 WHERE id=? AND push_alerts<>0",
+            )
+            .run(device.id);
+          await this.db
+            .prepare("UPDATE push_jobs SET kind='sync',notification=NULL WHERE device_id=?")
+            .run(device.id);
         }
-        await this.db
-          .prepare("UPDATE client_devices SET push_enabled=1 WHERE id=?")
-          .run(device.id);
+        await this.db.prepare("UPDATE client_devices SET push_enabled=1 WHERE id=?").run(device.id);
       });
       return;
     }
@@ -261,18 +242,16 @@ export class DeviceService {
       typeof body.revision !== "string"
     )
       fail(400, "Invalid gateway registration");
-    const key = body.alertsEnabled === true ? JSON.stringify(notificationKey(body.notificationKey)) : null;
-    const generation = (await this.own(device.user_id, device.id))
-      .push_registered;
+    const key =
+      body.alertsEnabled === true ? JSON.stringify(notificationKey(body.notificationKey)) : null;
+    const generation = (await this.own(device.user_id, device.id)).push_registered;
     await this.pushService.validate(device, body);
     await this.db.transaction(async () => {
       const config = await this.db
         .prepare("SELECT revision FROM push_settings WHERE id=1 FOR SHARE")
         .get();
       if (config.revision !== body.revision) fail(409, "Push gateway changed");
-      await this.db
-        .prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE")
-        .get(device.id);
+      await this.db.prepare("SELECT id FROM client_devices WHERE id=? FOR UPDATE").get(device.id);
 
       if (
         sessionId &&
@@ -282,8 +261,7 @@ export class DeviceService {
       )
         fail(401, "Access revoked");
       const current = await this.own(device.user_id, device.id);
-      if (current.push_registered !== generation)
-        fail(409, "Device push registration changed");
+      if (current.push_registered !== generation) fail(409, "Device push registration changed");
       const validSession = await this.db
         .prepare(
           `SELECT 1 FROM users u JOIN sessions s ON s.user_id=u.id
@@ -292,8 +270,13 @@ export class DeviceService {
         .get(device.user_id, device.id, Date.now());
       if (!validSession) fail(401, "Access revoked");
       // Foreground re-registration must preserve pending encrypted notifications.
-      if (current.push_credential && current.push_credential_hash === hashToken(body.credential)
-        && current.push_alerts === (body.alertsEnabled === true ? 1 : 0) && current.notification_key === key) return;
+      if (
+        current.push_credential &&
+        current.push_credential_hash === hashToken(body.credential) &&
+        current.push_alerts === (body.alertsEnabled === true ? 1 : 0) &&
+        current.notification_key === key
+      )
+        return;
       await this.db
         .prepare(
           `UPDATE client_devices SET push_enabled=1,push_credential=?,push_credential_hash=?,push_alerts=?,notification_key=?,push_token=NULL,
@@ -308,9 +291,7 @@ export class DeviceService {
           device.id,
         );
       await this.pushService.remove(device.id);
-      await this.pushService.schedule(
-        await this.own(device.user_id, device.id),
-      );
+      await this.pushService.schedule(await this.own(device.user_id, device.id));
     });
   }
 }

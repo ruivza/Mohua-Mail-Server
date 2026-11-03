@@ -1,26 +1,30 @@
 import { ImapPool } from "./imap-pool.js";
-
-const fail = (status, message) => {
-  throw Object.assign(new Error(message), { status });
-};
+import { fail } from "./errors.js";
+import {
+  SECOND,
+  MINUTE,
+  MAX_UID,
+  CHUNK_BYTES,
+  READ_JOBS_PER_USER,
+  READ_JOBS_TOTAL,
+} from "./limits.js";
+// Most UIDs one list page scans for envelopes.
+const LIST_SPAN = 200;
 
 export function readOptions(params) {
   const folder = params.get("folder") || "INBOX";
-  if (folder.length > 512 || /[\x00-\x1f]/.test(folder))
-    fail(400, "Invalid folder");
+  if (folder.length > 512 || /[\x00-\x1f]/.test(folder)) fail(400, "Invalid folder");
   const integer = (name, fallback, max) => {
     const value = params.get(name);
     if (value === null) return fallback;
-    if (!/^[1-9]\d*$/.test(value) || Number(value) > max)
-      fail(400, "Invalid " + name);
+    if (!/^[1-9]\d*$/.test(value) || Number(value) > max) fail(400, "Invalid " + name);
     return Number(value);
   };
   const validity = params.get("uidValidity");
-  if (validity !== null && !/^[1-9]\d{0,19}$/.test(validity))
-    fail(400, "Invalid UIDVALIDITY");
+  if (validity !== null && !/^[1-9]\d{0,19}$/.test(validity)) fail(400, "Invalid UIDVALIDITY");
   return {
     folder,
-    before: integer("before", null, 4294967296),
+    before: integer("before", null, MAX_UID + 1),
     limit: integer("limit", 25, 50),
     validity,
   };
@@ -53,12 +57,10 @@ export function syncOptions(input) {
   if (
     !Number.isInteger(input.after) ||
     input.after < 0 ||
-    input.after > 4294967295 ||
+    input.after > MAX_UID ||
     !Array.isArray(input.known) ||
     input.known.length > 500 ||
-    input.known.some(
-      (uid) => !Number.isInteger(uid) || uid < 1 || uid > input.after,
-    ) ||
+    input.known.some((uid) => !Number.isInteger(uid) || uid < 1 || uid > input.after) ||
     new Set(input.known).size !== input.known.length
   )
     fail(400, "Invalid sync cursor");
@@ -66,18 +68,22 @@ export function syncOptions(input) {
 }
 
 export class MailReader {
-  constructor(mail, poolOptions) {
+  // Options: per-user and process-wide read limits; the rest configure the IMAP pool.
+  constructor(
+    mail,
+    { maxJobsPerUser = READ_JOBS_PER_USER, maxJobs = READ_JOBS_TOTAL, ...poolOptions } = {},
+  ) {
     this.mail = mail;
     this.jobs = new Map();
+    this.limits = { maxJobsPerUser, maxJobs };
     this.pool = new ImapPool(mail, poolOptions);
   }
-  async execute(account, options, operation, signal, timeoutMs = 30000) {
-    if (account.mode !== "proxy")
-      fail(409, "Direct mode: read mail on the device");
+  async execute(account, options, operation, signal, timeoutMs = 30 * SECOND) {
+    if (account.mode !== "proxy") fail(409, "Direct mode: read mail on the device");
     if (
-      this.jobs.size >= 16 ||
-      [...this.jobs.values()].filter((job) => job.user === account.user_id)
-        .length >= 2
+      this.jobs.size >= this.limits.maxJobs ||
+      [...this.jobs.values()].filter((job) => job.user === account.user_id).length >=
+        this.limits.maxJobsPerUser
     ) {
       fail(429, "Too many mailbox reads");
     }
@@ -124,9 +130,7 @@ export class MailReader {
         new Promise((_, reject) => {
           timer = setTimeout(() => {
             abort();
-            reject(
-              Object.assign(Error("Mailbox read timed out"), { status: 504 }),
-            );
+            reject(Object.assign(Error("Mailbox read timed out"), { status: 504 }));
           }, timeoutMs);
         }),
       ]);
@@ -159,11 +163,8 @@ export class MailReader {
     return this.execute(
       account,
       o,
-      async (client, box) => {
-        const end = Math.min(
-          (o.before ?? Number(box.uidNext)) - 1,
-          Number(box.uidNext) - 1,
-        );
+      async (client, box, checkCancelled) => {
+        const end = Math.min((o.before ?? Number(box.uidNext)) - 1, Number(box.uidNext) - 1);
         if (end < 1)
           return {
             uidValidity: String(box.uidValidity),
@@ -171,26 +172,32 @@ export class MailReader {
             items: [],
             nextBefore: null,
           };
-        const start = Math.max(1, end - 199);
-        const rows = await client.fetchAll(
-          `${start}:${end}`,
-          { uid: true, envelope: true, flags: true, size: true },
-          { uid: true },
-        );
-        const ordered = rows
-          .filter((m) => m.uid >= start && m.uid <= end)
-          .sort((a, b) => b.uid - a.uid);
+        // Dense folders need about one page of envelopes. Holes widen the scan to
+        // LIST_SPAN UIDs in a second fetch, so the worst case stays one 200-UID window.
+        let start = end + 1;
+        const rows = [];
+        for (const span of [Math.max(o.limit * 2, 50), LIST_SPAN]) {
+          const hi = start - 1,
+            lo = Math.max(1, end - span + 1);
+          if (hi < lo || rows.length >= o.limit) break;
+          start = lo;
+          const fetched = await client.fetchAll(
+            `${lo}:${hi}`,
+            { uid: true, envelope: true, flags: true, size: true },
+            { uid: true },
+          );
+          rows.push(...fetched.filter((m) => m.uid >= lo && m.uid <= hi));
+          checkCancelled();
+        }
+        // nextBefore stays an exclusive UID bound: below the last returned item when
+        // the scanned range held more, otherwise below the scanned range.
+        const ordered = rows.sort((a, b) => b.uid - a.uid);
         const selected = ordered.slice(0, o.limit);
         return {
           uidValidity: String(box.uidValidity),
           highWater: Number(box.uidNext) - 1,
           items: selected.map(summary),
-          nextBefore:
-            ordered.length > o.limit
-              ? selected.at(-1).uid
-              : start > 1
-                ? start
-                : null,
+          nextBefore: ordered.length > o.limit ? selected.at(-1).uid : start > 1 ? start : null,
         };
       },
       signal,
@@ -203,8 +210,7 @@ export class MailReader {
       options,
       async (client, box, checkCancelled) => {
         const latest = Number(box.uidNext) - 1;
-        if (options.after > latest)
-          fail(409, "Mailbox changed; reload message list");
+        if (options.after > latest) fail(409, "Mailbox changed; reload message list");
         // A bounded UID range advances across holes without fetching old envelopes or bodies.
         const highWater = Math.min(latest, options.after + 1000);
         const incoming =
@@ -228,9 +234,7 @@ export class MailReader {
           uidValidity: String(box.uidValidity),
           highWater,
           hasMore: highWater < latest,
-          items: incoming
-            .filter((m) => m.uid > options.after && m.uid <= highWater)
-            .map(summary),
+          items: incoming.filter((m) => m.uid > options.after && m.uid <= highWater).map(summary),
           existing: existing
             .filter((m) => known.has(m.uid))
             .map((m) => ({ uid: m.uid, flags: [...(m.flags || [])] })),
@@ -254,20 +258,17 @@ export class MailReader {
         if (!meta) fail(404, "Message not found");
         const parts = splitStructure(meta.bodyStructure);
         if (attachment !== null) {
-          const item =
-            attachment === "body" ? parts.body : parts.attachments[attachment];
+          const item = attachment === "body" ? parts.body : parts.attachments[attachment];
           if (!item) fail(404, "Attachment not found");
           if (!consume) fail(500, "Streaming response required");
           const download = await client.download(uid, item.part, {
             uid: true,
-            chunkSize: 65536,
+            chunkSize: CHUNK_BYTES,
           });
           try {
             return await consume({
               content: download.content,
-              filename:
-                item.filename ||
-                (item.type === "text/html" ? "body.html" : "body.txt"),
+              filename: item.filename || (item.type === "text/html" ? "body.html" : "body.txt"),
               contentType: item.type,
             });
           } finally {
@@ -277,24 +278,14 @@ export class MailReader {
         return messageMetadata(meta, o.validity, uid, parts);
       },
       signal,
-      attachment === null ? 30000 : 600000,
+      attachment === null ? 30 * SECOND : 10 * MINUTE,
     );
   }
 
   async mutate(account, o, uid, input, signal, authorize = () => {}) {
     if (!o.validity) fail(400, "UIDVALIDITY required");
     const action = input.action;
-    if (
-      ![
-        "read",
-        "unread",
-        "flag",
-        "unflag",
-        "move",
-        "archive",
-        "trash",
-      ].includes(action)
-    )
+    if (!["read", "unread", "flag", "unflag", "move", "archive", "trash"].includes(action))
       fail(400, "Invalid mail action");
     if (
       action === "move" &&
@@ -312,26 +303,18 @@ export class MailReader {
           fail(404, "Message not found");
         let destination = input.destination;
         if (["move", "archive", "trash"].includes(action)) {
-          const folders = (await client.list()).filter(
-            (f) => !f.flags?.has("\\Noselect"),
-          );
+          const folders = (await client.list()).filter((f) => !f.flags?.has("\\Noselect"));
           if (action !== "move") {
             const matches = folders.filter(
-              (f) =>
-                f.specialUse ===
-                (action === "archive" ? "\\Archive" : "\\Trash"),
+              (f) => f.specialUse === (action === "archive" ? "\\Archive" : "\\Trash"),
             );
             if (matches.length !== 1)
-              fail(
-                409,
-                "No unique destination folder; choose a folder manually",
-              );
+              fail(409, "No unique destination folder; choose a folder manually");
             destination = matches[0].path;
           }
           if (!folders.some((f) => f.path === destination))
             fail(400, "Destination folder not found");
-          if (destination === o.folder)
-            fail(409, "Message is already in this folder");
+          if (destination === o.folder) fail(409, "Message is already in this folder");
           // Require native MOVE to avoid non-atomic COPY/delete fallback.
           if (!client.capabilities?.has("MOVE"))
             fail(409, "Server does not support safe message move");
@@ -345,14 +328,9 @@ export class MailReader {
         }
         checkCancelled();
         await authorize();
-        const flag = ["read", "unread"].includes(action)
-          ? "\\Seen"
-          : "\\Flagged";
-        const method = ["read", "flag"].includes(action)
-          ? "messageFlagsAdd"
-          : "messageFlagsRemove";
-        if (!(await client[method](uid, [flag], { uid: true })))
-          fail(502, "Flag update failed");
+        const flag = ["read", "unread"].includes(action) ? "\\Seen" : "\\Flagged";
+        const method = ["read", "flag"].includes(action) ? "messageFlagsAdd" : "messageFlagsRemove";
+        if (!(await client[method](uid, [flag], { uid: true }))) fail(502, "Flag update failed");
         return { updated: true, reload: true };
       },
       signal,
@@ -360,8 +338,7 @@ export class MailReader {
   }
   invalidate(account) {
     this.pool.invalidate(account);
-    for (const job of this.jobs.values())
-      if (job.account === account) job.abort();
+    for (const job of this.jobs.values()) if (job.account === account) job.abort();
   }
   close() {
     this.pool.close();
@@ -406,8 +383,8 @@ export function splitStructure(root) {
     else attachments.push({ ...part, filename: "attachment" });
   }
   visit(root);
-  let body = texts.find((p) => p.type === "text/html") ||
-    texts.find((p) => p.type === "text/plain");
+  let body =
+    texts.find((p) => p.type === "text/html") || texts.find((p) => p.type === "text/plain");
   // Some providers label the only HTML part as a named attachment. When there is
   // no other text part, treat that part as the readable message body.
   const htmlAttachments = attachments.filter((part) => part.type === "text/html");
@@ -419,31 +396,29 @@ export function splitStructure(root) {
 }
 
 export function messageMetadata(meta, validity, uid, parts = splitStructure(meta.bodyStructure)) {
-const address = (values) =>
-          (values || [])
-            .map((v) =>
-              v.name ? v.name + " <" + v.address + ">" : v.address || "",
-            )
-            .join(", ");
-        return {
-          uid,
-          uidValidity: validity,
-          flags: [...(meta.flags || [])],
-          replyTo: meta.envelope?.replyTo || meta.envelope?.from || [],
-          toAddresses: meta.envelope?.to || [],
-          ccAddresses: meta.envelope?.cc || [],
-          subject: meta.envelope?.subject || "",
-          from: address(meta.envelope?.from),
-          to: address(meta.envelope?.to),
-          date: meta.envelope?.date || null,
-          body: parts.body ? { contentType: parts.body.type } : null,
-          attachments: parts.attachments.map((a, id) => ({
-            id,
-            filename: a.filename,
-            size: a.size,
-            contentType: a.type,
-            contentId: a.contentId || null,
-            sizeIsEncoded: true,
-          })),
-        };
+  const address = (values) =>
+    (values || [])
+      .map((v) => (v.name ? v.name + " <" + v.address + ">" : v.address || ""))
+      .join(", ");
+  return {
+    uid,
+    uidValidity: validity,
+    flags: [...(meta.flags || [])],
+    replyTo: meta.envelope?.replyTo || meta.envelope?.from || [],
+    toAddresses: meta.envelope?.to || [],
+    ccAddresses: meta.envelope?.cc || [],
+    subject: meta.envelope?.subject || "",
+    from: address(meta.envelope?.from),
+    to: address(meta.envelope?.to),
+    date: meta.envelope?.date || null,
+    body: parts.body ? { contentType: parts.body.type } : null,
+    attachments: parts.attachments.map((a, id) => ({
+      id,
+      filename: a.filename,
+      size: a.size,
+      contentType: a.type,
+      contentId: a.contentId || null,
+      sizeIsEncoded: true,
+    })),
+  };
 }

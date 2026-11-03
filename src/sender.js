@@ -2,20 +2,26 @@ import { randomUUID, createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import MailComposer from "nodemailer/lib/mail-composer";
 import { readOptions } from "./reader.js";
-const fail = (status, message) => {
-  throw Object.assign(new Error(message), { status });
-};
-const MAX_UPLOAD = 25 * 1024 * 1024,
-  MAX_MIME = 40 * 1024 * 1024;
-const clean = (s, n) =>
-  typeof s === "string" && s.length <= n && !/[\r\n\x00]/.test(s);
+import { fail } from "./errors.js";
+import {
+  MINUTE,
+  MAX_UID,
+  CHUNK_BYTES,
+  MAX_UPLOAD_BYTES,
+  MAX_MIME_BYTES,
+  SEND_ACTIVE_PER_USER,
+  SEND_ACTIVE_TOTAL,
+  SEND_PENDING_PER_USER,
+  SEND_PENDING_TOTAL,
+} from "./limits.js";
+// Header text: bounded and free of CR, LF and NUL so it cannot inject headers.
+const headerSafe = (s, n) => typeof s === "string" && s.length <= n && !/[\r\n\x00]/.test(s);
 function addresses(value) {
-  if (!Array.isArray(value) || value.length > 100)
-    fail(400, "Use an array of email addresses");
+  if (!Array.isArray(value) || value.length > 100) fail(400, "Use an array of email addresses");
   return [
     ...new Set(
       value.map((a) => {
-        if (!clean(a, 254) || !/^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(a))
+        if (!headerSafe(a, 254) || !/^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(a))
           fail(400, "Invalid recipient");
         return a;
       }),
@@ -24,7 +30,7 @@ function addresses(value) {
 }
 export function validateSend(input) {
   if (
-    !clean(input.subject, 998) ||
+    !headerSafe(input.subject, 998) ||
     typeof input.text !== "string" ||
     Buffer.byteLength(input.text) > 256 * 1024
   )
@@ -32,29 +38,19 @@ export function validateSend(input) {
   const to = addresses(input.to || []),
     cc = addresses(input.cc || []),
     bcc = addresses(input.bcc || []);
-  if (
-    (!to.length && !cc.length && !bcc.length) ||
-    to.length + cc.length + bcc.length > 100
-  )
+  if ((!to.length && !cc.length && !bcc.length) || to.length + cc.length + bcc.length > 100)
     fail(400, "Require 1–100 recipients");
-  if (!["provider", "append"].includes(input.sentCopy))
-    fail(400, "Choose sent copy policy");
+  if (!["provider", "append"].includes(input.sentCopy)) fail(400, "Choose sent copy policy");
   const attachments = input.attachments || [];
-  if (!Array.isArray(attachments) || attachments.length > 20)
-    fail(400, "Maximum 20 attachments");
+  if (!Array.isArray(attachments) || attachments.length > 20) fail(400, "Maximum 20 attachments");
   let total = 0;
   const files = attachments.map((f) => {
-    if (
-      !clean(f.filename, 200) ||
-      !f.filename ||
-      !Number.isSafeInteger(f.size) ||
-      f.size < 0
-    )
+    if (!headerSafe(f.filename, 200) || !f.filename || !Number.isSafeInteger(f.size) || f.size < 0)
       fail(400, "Invalid attachment");
     total += f.size;
     return { filename: f.filename, size: f.size };
   });
-  if (total > MAX_UPLOAD) fail(413, "Attachments exceed 25 MiB");
+  if (total > MAX_UPLOAD_BYTES) fail(413, "Attachments exceed 25 MiB");
   let source = null;
   if (input.source) {
     const s = input.source;
@@ -62,14 +58,12 @@ export function validateSend(input) {
       !["reply", "replyAll", "forward"].includes(s.kind) ||
       !Number.isInteger(s.uid) ||
       s.uid < 1 ||
-      s.uid > 4294967295 ||
+      s.uid > MAX_UID ||
       typeof s.folder !== "string" ||
       typeof s.uidValidity !== "string"
     )
       fail(400, "Invalid source message");
-    const o = readOptions(
-      new URLSearchParams({ folder: s.folder, uidValidity: s.uidValidity }),
-    );
+    const o = readOptions(new URLSearchParams({ folder: s.folder, uidValidity: s.uidValidity }));
     source = { kind: s.kind, uid: s.uid, ...o };
   }
   return {
@@ -92,7 +86,8 @@ export function uploadParts(stream, files) {
   async function next() {
     const r = await iterator.next();
     ended = r.done;
-    if (!ended) pending = Buffer.from(r.value);
+    // HTTP request chunks are already Buffers; only other sources need a copy.
+    if (!ended) pending = Buffer.isBuffer(r.value) ? r.value : Buffer.from(r.value);
   }
   return {
     parts: files.map((f) => ({
@@ -124,8 +119,17 @@ export function uploadParts(stream, files) {
   };
 }
 export class MailSender {
-  constructor({ mail, reader, db }) {
+  constructor({
+    mail,
+    reader,
+    db,
+    maxActivePerUser = SEND_ACTIVE_PER_USER,
+    maxActive = SEND_ACTIVE_TOTAL,
+    maxPendingPerUser = SEND_PENDING_PER_USER,
+    maxPending = SEND_PENDING_TOTAL,
+  }) {
     Object.assign(this, { mail, reader, db });
+    this.limits = { maxActivePerUser, maxActive, maxPendingPerUser, maxPending };
     this.pending = new Map();
     this.active = new Map();
   }
@@ -135,17 +139,15 @@ export class MailSender {
     );
     this.timer = setInterval(() => {
       this.pruning = this.prune().catch(() => {});
-    }, 60000);
+    }, MINUTE);
     this.timer.unref();
   }
   async prune() {
     for (const [id, p] of this.pending)
-      if (Date.now() - p.created > 900000) {
+      if (Date.now() - p.created > 15 * MINUTE) {
         this.pending.delete(id);
         await this.db
-          .prepare(
-            "UPDATE outbox SET state='expired' WHERE id=? AND state='prepared'",
-          )
+          .prepare("UPDATE outbox SET state='expired' WHERE id=? AND state='prepared'")
           .run(id);
       }
   }
@@ -162,11 +164,9 @@ export class MailSender {
   }
   async prepare(account, user, key, input) {
     return this.db.transaction(async () => {
-      await this.db.query(
-        "SELECT pg_advisory_xact_lock(734624, hashtext(current_schema()))",
-      );
+      await this.db.query("SELECT pg_advisory_xact_lock(734624, hashtext(current_schema()))");
       if (account.mode !== "proxy") fail(409, "Direct mode: send on device");
-      if (!clean(key, 100) || !key || !/^[\w-]+$/.test(key))
+      if (!headerSafe(key, 100) || !key || !/^[\w-]+$/.test(key))
         fail(400, "Idempotency-Key required");
       const data = validateSend(input);
       const digest = createHash("sha256")
@@ -176,14 +176,14 @@ export class MailSender {
         .prepare("SELECT * FROM outbox WHERE user_id=? AND request_key=?")
         .get(user, key);
       if (old) {
-        if (old.digest !== digest)
-          fail(409, "Key already used for a different message");
+        if (old.digest !== digest) fail(409, "Key already used for a different message");
         return await this.status(old.id, user);
       }
       await this.prune();
+      const { maxPending, maxPendingPerUser } = this.limits;
       if (
-        this.pending.size >= 32 ||
-        [...this.pending.values()].filter((p) => p.user === user).length >= 4
+        this.pending.size >= maxPending ||
+        [...this.pending.values()].filter((p) => p.user === user).length >= maxPendingPerUser
       )
         fail(429, "Too many prepared messages");
       const id = randomUUID(),
@@ -197,9 +197,12 @@ export class MailSender {
   }
   async submit(id, user, upload, authorize) {
     if (this.closed) fail(503, "Service closing");
+    const { maxActive, maxActivePerUser } = this.limits;
+    // One job per outbox ID: a second upload of the same message never runs alongside the first.
     if (
-      this.active.size >= 2 ||
-      [...this.active.values()].some((j) => j.user === user)
+      this.active.has(id) ||
+      this.active.size >= maxActive ||
+      [...this.active.values()].filter((j) => j.user === user).length >= maxActivePerUser
     )
       fail(429, "Another send is running");
     const job = { user, cancelled: false, smtpStarted: false };
@@ -220,9 +223,7 @@ export class MailSender {
     job.account = p.account.id;
     if (job.cancelled || this.closed) fail(503, "Service closing");
     const claimed = await this.db
-      .prepare(
-        "UPDATE outbox SET state='sending' WHERE id=? AND user_id=? AND state='prepared'",
-      )
+      .prepare("UPDATE outbox SET state='sending' WHERE id=? AND user_id=? AND state='prepared'")
       .run(id, user);
     if (!claimed.changes) return this.status(id, user);
     this.pending.delete(id);
@@ -266,18 +267,17 @@ export class MailSender {
         if (!original) fail(404, "Original message missing");
         const mid = original.envelope?.messageId;
         if (data.source.kind !== "forward") {
-          if (!clean(mid, 998) || !/^<[^<>\s]+>$/.test(mid))
+          if (!headerSafe(mid, 998) || !/^<[^<>\s]+>$/.test(mid))
             fail(422, "Original Message-ID unavailable");
           options.inReplyTo = mid;
           options.references = [original.envelope?.inReplyTo, mid].filter(
-            (m) => clean(m, 998) && /^<[^<>\s]+>$/.test(m),
+            (m) => headerSafe(m, 998) && /^<[^<>\s]+>$/.test(m),
           );
         } else {
-          if (original.size > MAX_UPLOAD)
-            fail(413, "Original email exceeds 25 MiB");
+          if (original.size > MAX_UPLOAD_BYTES) fail(413, "Original email exceeds 25 MiB");
           const dl = await sourceClient.download(data.source.uid, undefined, {
             uid: true,
-            chunkSize: 65536,
+            chunkSize: CHUNK_BYTES,
           });
           streams.push(dl.content);
           options.attachments.push({
@@ -299,14 +299,10 @@ export class MailSender {
           (f) => f.specialUse === "\\Sent" && !f.flags?.has("\\Noselect"),
         );
         if (folders.length !== 1)
-          fail(
-            409,
-            "No unique Sent folder; configure provider copy or mailbox folders",
-          );
+          fail(409, "No unique Sent folder; configure provider copy or mailbox folders");
         destination = folders[0].path;
       }
-      if (![465, 587].includes(account.smtp_port))
-        fail(400, "SMTP TLS requires 465 or 587");
+      if (![465, 587].includes(account.smtp_port)) fail(400, "SMTP TLS requires 465 or 587");
       const host = await this.mail.resolveHost(account.smtp_host);
       await check();
       job.smtp = this.mail.smtpFactory({
@@ -333,6 +329,7 @@ export class MailSender {
       await check();
       const mime = new MailComposer(options).compile().createReadStream();
       streams.push(mime);
+      // The append copy buffers the encoded MIME: at most MAX_MIME_BYTES per active send.
       const saved = [];
       let size = 0;
       const raw = Readable.from(
@@ -340,7 +337,7 @@ export class MailSender {
           for await (const chunk of mime) {
             await check();
             size += chunk.length;
-            if (size > MAX_MIME) fail(413, "Encoded email exceeds 40 MiB");
+            if (size > MAX_MIME_BYTES) fail(413, "Encoded email exceeds 40 MiB");
             if (data.sentCopy === "append") saved.push(chunk);
             yield chunk;
           }
@@ -369,29 +366,18 @@ export class MailSender {
       if (data.sentCopy === "append") {
         try {
           await check();
-          const result = await sentClient.append(
-            destination,
-            Buffer.concat(saved),
-            ["\\Seen"],
-          );
+          const result = await sentClient.append(destination, Buffer.concat(saved), ["\\Seen"]);
           confirmed.sentCopy = result ? "saved" : "failed";
         } catch {
           confirmed.sentCopy = "failed_or_unknown";
         }
-        if (!job.cancelled)
-          await update(confirmed.rejected ? "partial" : "sent", confirmed);
+        if (!job.cancelled) await update(confirmed.rejected ? "partial" : "sent", confirmed);
       }
     };
     try {
       await Promise.race([
         p.data.source
-          ? this.reader.execute(
-              p.account,
-              p.data.source,
-              perform,
-              undefined,
-              600000,
-            )
+          ? this.reader.execute(p.account, p.data.source, perform, undefined, 10 * MINUTE)
           : perform(),
         new Promise((_, reject) => {
           job.abort = () => {
@@ -402,15 +388,13 @@ export class MailSender {
             for (const s of streams) s.destroy();
             reject(Error("cancelled or timed out"));
           };
-          timer = setTimeout(job.abort, 600000);
+          timer = setTimeout(job.abort, 10 * MINUTE);
         }),
       ]);
     } catch (e) {
       if (!confirmed)
         await update(job.smtpStarted ? "unknown" : "failed", {
-          error: e.status
-            ? e.message
-            : "Send failed; check status before retrying",
+          error: e.status ? e.message : "Send failed; check status before retrying",
         });
       else if (confirmed.sentCopy === "pending") {
         confirmed.sentCopy = "failed_or_unknown";
@@ -426,7 +410,14 @@ export class MailSender {
     return await this.status(id, user);
   }
   invalidate(account) {
-    for (const job of this.active.values()) if (job.account === account) { job.cancelled = true; job.abort?.(); job.smtp?.close(); job.client?.close(); job.sourceClient?.close(); }
+    for (const job of this.active.values())
+      if (job.account === account) {
+        job.cancelled = true;
+        job.abort?.();
+        job.smtp?.close();
+        job.client?.close();
+        job.sourceClient?.close();
+      }
   }
   async close() {
     this.closed = true;

@@ -1,6 +1,6 @@
 {
   "name": "mohua-server",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,6 +9,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
+    "format": "npx --yes prettier@3.3.3 --write .",
+    "format:check": "npx --yes prettier@3.3.3 --check .",
     "export:server": "node scripts/export-server.mjs",
     "configure": "node scripts/configure.mjs",
     "docker:up": "docker compose up -d --build --wait",

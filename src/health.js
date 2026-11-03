@@ -3,6 +3,8 @@ import { performance } from "node:perf_hooks";
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
 import { publicAddress } from "./mail.js";
+import { fail } from "./errors.js";
+import { SECOND, MINUTE, DAY } from "./limits.js";
 
 // Independent synthetic account. Never reads the users/accounts tables.
 export function describeProbeError(error, aborted = false) {
@@ -45,7 +47,7 @@ export function describeProbeError(error, aborted = false) {
   return { status: "error", detail: "邮件自检未完成，请查看失败阶段" };
 }
 export class HealthService {
-  constructor({ db, seal, decrypt, mail, probe, intervalMs = 60000 }) {
+  constructor({ db, seal, decrypt, mail, probe, intervalMs = MINUTE }) {
     Object.assign(this, { db, seal, decrypt, mail, intervalMs });
     this.probe = probe || this.externalProbe.bind(this);
     this.running = false;
@@ -75,14 +77,15 @@ export class HealthService {
     this.timer.unref();
   }
   async get(key) {
-    return (
-      await this.db
-        .prepare("SELECT value FROM service_settings WHERE key=?")
-        .get(key)
-    )?.value;
+    return (await this.db.prepare("SELECT value FROM service_settings WHERE key=?").get(key))
+      ?.value;
   }
   async put(key, value) {
-    await this.db.prepare("INSERT INTO service_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+    await this.db
+      .prepare(
+        "INSERT INTO service_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      )
+      .run(key, value);
   }
   async sample() {
     if (this.closed) return;
@@ -92,7 +95,11 @@ export class HealthService {
       elapsed = now - this.cpuAt;
     const cpu =
       elapsed > 0
-        ? Math.max(0, ((usage.user + usage.system - this.cpu.user - this.cpu.system) / (elapsed * 1000)) * 100)
+        ? Math.max(
+            0,
+            ((usage.user + usage.system - this.cpu.user - this.cpu.system) / (elapsed * 1000)) *
+              100,
+          )
         : 0;
     this.cpu = usage;
     this.cpuAt = now;
@@ -107,12 +114,8 @@ export class HealthService {
           "INSERT INTO service_samples(at,memory,cpu) VALUES(?,?,?) ON CONFLICT(at) DO UPDATE SET memory=excluded.memory,cpu=excluded.cpu",
         )
         .run(at, this.latest.memory, this.latest.cpu);
-      await this.db
-        .prepare("DELETE FROM service_samples WHERE at<?")
-        .run(at - 7 * 86400000);
-      await this.db
-        .prepare("DELETE FROM selftest_runs WHERE started<?")
-        .run(at - 30 * 86400000);
+      await this.db.prepare("DELETE FROM service_samples WHERE at<?").run(at - 7 * DAY);
+      await this.db.prepare("DELETE FROM selftest_runs WHERE started<?").run(at - 30 * DAY);
     } catch {
       this.latest.recorded = false;
     }
@@ -125,19 +128,15 @@ export class HealthService {
       running: this.running,
       samples: await this.db
         .prepare("SELECT at,memory,cpu FROM service_samples WHERE at>? ORDER BY at")
-        .all(Date.now() - 86400000),
+        .all(Date.now() - DAY),
       runs: await this.db
         .prepare("SELECT * FROM selftest_runs ORDER BY started DESC LIMIT 100")
         .all(),
     };
   }
   async run() {
-    if (this.running)
-      throw Object.assign(new Error("Self-test already running"), {
-        status: 409,
-      });
-    if (this.closed)
-      throw Object.assign(new Error("Service closing"), { status: 503 });
+    if (this.running) fail(409, "Self-test already running");
+    if (this.closed) fail(503, "Service closing");
     const started = Date.now(),
       id = randomUUID();
     this.running = true;
@@ -153,9 +152,7 @@ export class HealthService {
     this.controller = controller;
     const update = async (stage) => {
       if (!this.closed && !controller.signal.aborted)
-        await this.db
-          .prepare("UPDATE selftest_runs SET stage=? WHERE id=?")
-          .run(stage, id);
+        await this.db.prepare("UPDATE selftest_runs SET stage=? WHERE id=?").run(stage, id);
     };
     let timer;
     this.pending = (async () => {
@@ -166,10 +163,8 @@ export class HealthService {
           new Promise((_, reject) => {
             timer = setTimeout(() => {
               controller.abort();
-              reject(
-                Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }),
-              );
-            }, 60000);
+              reject(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }));
+            }, MINUTE);
           }),
         ]);
         result = { status: "ok", detail: "SMTP 提交与 IMAP 读取匹配成功" };
@@ -180,9 +175,7 @@ export class HealthService {
         controller.abort();
         if (!this.closed)
           await this.db
-            .prepare(
-              "UPDATE selftest_runs SET status=?,duration=?,detail=? WHERE id=?",
-            )
+            .prepare("UPDATE selftest_runs SET status=?,duration=?,detail=? WHERE id=?")
             .run(result.status, Date.now() - started, result.detail, id);
         this.running = false;
       }
@@ -210,8 +203,7 @@ export class HealthService {
         });
         if (!response.ok) throw Error();
         account = await response.json();
-        if (account.status !== "success" || !account.user || !account.pass)
-          throw Error();
+        if (account.status !== "success" || !account.user || !account.pass) throw Error();
       } catch (e) {
         if (signal.aborted) throw e;
         throw Object.assign(new Error("Test provider unavailable"), {
@@ -249,9 +241,9 @@ export class HealthService {
           minVersion: "TLSv1.2",
         },
         logger: false,
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 15000,
+        connectionTimeout: 10 * SECOND,
+        greetingTimeout: 10 * SECOND,
+        socketTimeout: 15 * SECOND,
       });
       await smtp.verify();
       guard();
@@ -276,9 +268,9 @@ export class HealthService {
         secure: true,
         auth: { user: account.user, pass: account.pass },
         logger: false,
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 15000,
+        connectionTimeout: 10 * SECOND,
+        greetingTimeout: 10 * SECOND,
+        socketTimeout: 15 * SECOND,
         tls: { rejectUnauthorized: true, minVersion: "TLSv1.2" },
       });
       imap.on("error", () => {});
@@ -289,10 +281,7 @@ export class HealthService {
       let match = false;
       for (let attempt = 0; attempt < 8 && !match; attempt++) {
         guard();
-        const ids = await imap.search(
-          { header: { "Message-ID": messageId } },
-          { uid: true },
-        );
+        const ids = await imap.search({ header: { "Message-ID": messageId } }, { uid: true });
         if (ids.length) {
           const item = await imap.fetchOne(
             ids.at(-1),

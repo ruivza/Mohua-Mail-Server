@@ -29,7 +29,13 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
   }
   const password = "password-long-123";
   const login = (email, deviceName, deviceId) =>
-    api("/client/login", "", "POST", { email, password, deviceName, deviceId, deviceInfo: { model: "iPhone", systemVersion: "27.0" } });
+    api("/client/login", "", "POST", {
+      email,
+      password,
+      deviceName,
+      deviceId,
+      deviceInfo: { model: "iPhone", systemVersion: "27.0" },
+    });
   await start();
   try {
     await api("/setup", "", "POST", {
@@ -38,7 +44,11 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       setupToken: "test",
     });
     const admin = (
-      await api("/login", "", "POST", { email: "admin@example.com", password, deviceName: "Ignored manual name" })
+      await api("/login", "", "POST", {
+        email: "admin@example.com",
+        password,
+        deviceName: "Ignored manual name",
+      })
     ).data.token;
     assert.equal((await api("/devices", admin)).data[0].name, "Safari · macOS");
     assert.equal((await api("/admin/push", admin)).data.mode, "official");
@@ -52,18 +62,9 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       ).status,
       400,
     );
-    assert.equal(
-      (await api("/admin/push", admin, "PATCH", { mode: "disabled" })).status,
-      200,
-    );
-    assert.equal(
-      (await api("/admin/push/test", admin, "POST", {})).data.ready,
-      false,
-    );
-    assert.equal(
-      (await app.db.prepare("SELECT COUNT(*) n FROM users").get()).n,
-      0,
-    );
+    assert.equal((await api("/admin/push", admin, "PATCH", { mode: "disabled" })).status, 200);
+    assert.equal((await api("/admin/push/test", admin, "POST", {})).data.ready, false);
+    assert.equal((await app.db.prepare("SELECT COUNT(*) n FROM users").get()).n, 0);
     assert.equal((await login("admin@example.com", "Admin phone")).status, 401);
     assert.equal((await api("/accounts", admin)).status, 403);
     assert.equal((await api("/accounts", admin, "POST", {})).status, 403);
@@ -78,13 +79,8 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       403,
     );
     for (const email of ["owner@example.com", "other@example.com"]) {
-      const invite = (await api("/admin/invites", admin, "POST", {})).data
-        .invite;
-      assert.equal(
-        (await api("/register", "", "POST", { email, password, invite }))
-          .status,
-        201,
-      );
+      const invite = (await api("/admin/invites", admin, "POST", {})).data.invite;
+      assert.equal((await api("/register", "", "POST", { email, password, invite })).status, 201);
       assert.equal(
         (
           await api("/register", "", "POST", {
@@ -116,9 +112,8 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
     });
     assert.equal(wrongPassword.status, 401);
     assert.equal((await api("/me", first.token)).status, 200);
-    const unrelated = (
-      await login("other@example.com", "Separate installation", first.deviceId)
-    ).data;
+    const unrelated = (await login("other@example.com", "Separate installation", first.deviceId))
+      .data;
     assert.notEqual(unrelated.deviceId, first.deviceId);
     assert.equal((await api("/me", first.token)).status, 200);
     assert.equal((await api("/admin/health", first.token)).status, 403);
@@ -135,24 +130,14 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       })
     ).data.id;
     assert.ok(mailbox);
-    assert.equal(
-      (await api(`/accounts/${mailbox}/access`, first.token)).status,
-      200,
-    );
+    assert.equal((await api(`/accounts/${mailbox}/access`, first.token)).status, 200);
     assert.equal((await api(`/accounts/${mailbox}/access`, admin)).status, 403);
-    assert.equal(
-      (await api(`/accounts/${mailbox}/access`, other.token)).status,
-      404,
-    );
+    assert.equal((await api(`/accounts/${mailbox}/access`, other.token)).status, 404);
     assert.equal((await api("/accounts", second.token)).data[0].id, mailbox);
     assert.deepEqual((await api("/accounts", other.token)).data, []);
+    assert.equal((await api(`/accounts/${mailbox}`, other.token, "DELETE")).status, 404);
     assert.equal(
-      (await api(`/accounts/${mailbox}`, other.token, "DELETE")).status,
-      404,
-    );
-    assert.equal(
-      (await api(`/client-devices/${first.deviceId}`, other.token, "DELETE"))
-        .status,
+      (await api(`/client-devices/${first.deviceId}`, other.token, "DELETE")).status,
       404,
     );
     assert.equal(
@@ -168,14 +153,8 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       accountId: mailbox,
       revision: 1,
     });
-    assert.equal(
-      (await api("/client/sync", first.token)).data.mailboxes[0].syncPending,
-      false,
-    );
-    assert.equal(
-      (await api("/client/sync", second.token)).data.mailboxes[0].syncPending,
-      true,
-    );
+    assert.equal((await api("/client/sync", first.token)).data.mailboxes[0].syncPending, false);
+    assert.equal((await api("/client/sync", second.token)).data.mailboxes[0].syncPending, true);
     await app.devices.changed(mailbox);
     assert.equal(
       (
@@ -195,37 +174,26 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
       ).status,
       400,
     );
-    assert.equal(
-      (await api("/client/push", first.token, "POST", { enabled: false }))
-        .status,
-      200,
-    );
-    assert.equal(
-      (await api("/client/push/config", first.token)).data.enabled,
-      false,
-    );
+    assert.equal((await api("/client/push", first.token, "POST", { enabled: false })).status, 200);
+    assert.equal((await api("/client/push/config", first.token)).data.enabled, false);
     assert.equal((await api("/admin/push", first.token)).status, 403);
     assert.equal(
-      (
-        await app.db
-          .prepare("SELECT push_token FROM client_devices WHERE id=?")
-          .get(first.deviceId)
-      ).push_token,
+      (await app.db.prepare("SELECT push_token FROM client_devices WHERE id=?").get(first.deviceId))
+        .push_token,
       null,
     );
     await app.close();
     await start();
-    assert.equal(
-      (await api("/client/sync", first.token)).data.mailboxes[0].revision,
-      2,
-    );
-    const renewed = (
-      await login("owner@example.com", "Renamed phone", first.deviceId)
-    ).data;
+    assert.equal((await api("/client/sync", first.token)).data.mailboxes[0].revision, 2);
+    const renewed = (await login("owner@example.com", "Renamed phone", first.deviceId)).data;
     assert.equal(renewed.deviceId, first.deviceId);
     const namedDevices = (await api("/client-devices", renewed.token)).data;
-    assert.equal(namedDevices.find(d => d.id === renewed.deviceId).name, "iPhone · iOS 27.0");
-    assert.equal((await api(`/client-devices/${renewed.deviceId}`, renewed.token, "PATCH", { name: "Manual" })).status, 404);
+    assert.equal(namedDevices.find((d) => d.id === renewed.deviceId).name, "iPhone · iOS 27.0");
+    assert.equal(
+      (await api(`/client-devices/${renewed.deviceId}`, renewed.token, "PATCH", { name: "Manual" }))
+        .status,
+      404,
+    );
 
     assert.equal((await api("/me", first.token)).status, 401);
     assert.equal((await api("/me", second.token)).status, 200);
@@ -233,18 +201,12 @@ test("separate admin identity, invitation registration, user-wide mailboxes and 
     assert.equal((await api("/me", renewed.token)).status, 401);
     assert.equal((await api("/me", second.token)).status, 200);
     assert.equal(
-      (
-        await app.db
-          .prepare("SELECT push_token FROM client_devices WHERE id=?")
-          .get(first.deviceId)
-      ).push_token,
+      (await app.db.prepare("SELECT push_token FROM client_devices WHERE id=?").get(first.deviceId))
+        .push_token,
       null,
     );
-    await api(`/accounts/${mailbox}`, second.token, "DELETE", {email:"mail@example.com"});
-    assert.equal(
-      (await api("/client/sync", second.token)).data.mailboxes.length,
-      0,
-    );
+    await api(`/accounts/${mailbox}`, second.token, "DELETE", { email: "mail@example.com" });
+    assert.equal((await api("/client/sync", second.token)).data.mailboxes.length, 0);
     await api("/logout", second.token, "POST", {});
     assert.equal((await api("/me", second.token)).status, 401);
     assert.equal((await api("/me", other.token)).status, 200);

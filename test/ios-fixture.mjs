@@ -91,7 +91,10 @@ const app = await createApp({
         on() {},
         connect: async () => {
           connections++;
-          if (options.auth.pass === "wrong-password") throw Object.assign(Error("Synthetic authentication failure"), {authenticationFailed:true});
+          if (options.auth.pass === "wrong-password")
+            throw Object.assign(Error("Synthetic authentication failure"), {
+              authenticationFailed: true,
+            });
         },
         close() {},
         logout: async () => {},
@@ -270,13 +273,7 @@ const app = await createApp({
 });
 await app.db
   .prepare("INSERT INTO users VALUES(?,?,?,?,?)")
-  .run(
-    "fixture-owner",
-    "owner@example.com",
-    passwordHash("fixture-password-123"),
-    "user",
-    1,
-  );
+  .run("fixture-owner", "owner@example.com", passwordHash("fixture-password-123"), "user", 1);
 for (const [id, mode] of [
   ["fixture-proxy", "proxy"],
   ["fixture-direct", "direct"],
@@ -308,25 +305,35 @@ app.server.on("request", async (req, res) => {
   // Local-only transfer regressions: never routes to a real mailbox.
   if (req.method === "GET" && req.url.startsWith("/__test/download/")) {
     const kind = req.url.split("/").at(-1);
-    if (kind === "redirect") { res.writeHead(302, { Location: "/__test/download/ok" }); res.end(); return; }
-    if (kind === "denied") { res.writeHead(403); res.end("denied"); return; }
+    if (kind === "redirect") {
+      res.writeHead(302, { Location: "/__test/download/ok" });
+      res.end();
+      return;
+    }
+    if (kind === "denied") {
+      res.writeHead(403);
+      res.end("denied");
+      return;
+    }
     if (kind === "broken") {
       res.writeHead(200, { "Content-Length": "1000" });
-      res.write("partial"); setTimeout(() => res.destroy(), 50); return;
+      res.write("partial");
+      setTimeout(() => res.destroy(), 50);
+      return;
     }
     if (kind === "slow") {
-      res.writeHead(200); res.write("partial");
+      res.writeHead(200);
+      res.write("partial");
       const timer = setTimeout(() => res.end("done"), 10000);
-      res.on("close", () => clearTimeout(timer)); return;
+      res.on("close", () => clearTimeout(timer));
+      return;
     }
     const data = kind === "large" ? Buffer.alloc(65536) : Buffer.from("complete file");
-    res.writeHead(200, { "Content-Length": String(data.length) }); res.end(data); return;
+    res.writeHead(200, { "Content-Length": String(data.length) });
+    res.end(data);
+    return;
   }
-  if (
-    dropSendResponse &&
-    req.method === "PUT" &&
-    req.url.startsWith("/api/outbox/")
-  ) {
+  if (dropSendResponse && req.method === "PUT" && req.url.startsWith("/api/outbox/")) {
     dropSendResponse = false;
     res.end = () => {
       res.destroy();
@@ -358,9 +365,13 @@ app.server.on("request", async (req, res) => {
       )?.id;
     switch (req.url) {
       case "/__test/reset":
-        await app.db.prepare("UPDATE accounts SET sync_enabled=0,writeback_enabled=0,sync_credential=NULL,sync_status='off',purge_after=NULL,deletion_requested_at=NULL").run();
+        await app.db
+          .prepare(
+            "UPDATE accounts SET sync_enabled=0,writeback_enabled=0,sync_credential=NULL,sync_status='off',purge_after=NULL,deletion_requested_at=NULL",
+          )
+          .run();
         for (const id of app.sync.running.keys()) app.sync.invalidate(id);
-        await Promise.all([...app.sync.running.values()].map(job => job.promise));
+        await Promise.all([...app.sync.running.values()].map((job) => job.promise));
         await app.db.prepare("DELETE FROM mailbox_source_links").run();
         await app.db.prepare("DELETE FROM mailbox_writebacks").run();
         await app.db.prepare("DELETE FROM archive_messages").run();
@@ -378,11 +389,29 @@ app.server.on("request", async (req, res) => {
         // Revoking fixture devices also revokes their in-memory mail leases.
         // Restore synthetic authorization so sync tests never need real credentials.
         for (const id of ["fixture-proxy", "fixture-direct"]) {
-          const mode=id==='fixture-proxy'?'proxy':'direct';
-          await app.db.prepare("INSERT INTO accounts(id,user_id,email,mode,imap_host,imap_port,smtp_host,smtp_port,credential) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING").run(id,'fixture-owner',mode+'@example.com',mode,'imap.example.com',993,'smtp.example.com',465,'client-v1:'+JSON.stringify(clientCredential('fixture-only',id).envelope));
-          if(!(await app.db.prepare("SELECT credential FROM accounts WHERE id=?").get(id)).credential){
-            const cred=clientCredential("fixture-only",id);
-            await app.db.prepare("UPDATE accounts SET credential=? WHERE id=?").run("client-v1:"+JSON.stringify(cred.envelope),id);
+          const mode = id === "fixture-proxy" ? "proxy" : "direct";
+          await app.db
+            .prepare(
+              "INSERT INTO accounts(id,user_id,email,mode,imap_host,imap_port,smtp_host,smtp_port,credential) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            )
+            .run(
+              id,
+              "fixture-owner",
+              mode + "@example.com",
+              mode,
+              "imap.example.com",
+              993,
+              "smtp.example.com",
+              465,
+              "client-v1:" + JSON.stringify(clientCredential("fixture-only", id).envelope),
+            );
+          if (
+            !(await app.db.prepare("SELECT credential FROM accounts WHERE id=?").get(id)).credential
+          ) {
+            const cred = clientCredential("fixture-only", id);
+            await app.db
+              .prepare("UPDATE accounts SET credential=? WHERE id=?")
+              .run("client-v1:" + JSON.stringify(cred.envelope), id);
           }
           await authorizeFixture(app, id);
         }
@@ -392,8 +421,11 @@ app.server.on("request", async (req, res) => {
           .run(hashToken("fixture-invitation"), Date.now() + 600000);
         break;
       case "/__test/many-messages":
-        folders.set("INBOX", Array.from({ length: 55 }, (_, index) => 154 - index));
-        flags = new Map(folders.get("INBOX").map(uid => [uid, new Set()]));
+        folders.set(
+          "INBOX",
+          Array.from({ length: 55 }, (_, index) => 154 - index),
+        );
+        flags = new Map(folders.get("INBOX").map((uid) => [uid, new Set()]));
         uidNext = 155;
         break;
       case "/__test/second-mailbox":
@@ -452,12 +484,36 @@ app.server.on("request", async (req, res) => {
                 .get(await latest())
             )?.push_enabled,
           ),
-          alertsEnabled: Boolean((await app.db.prepare("SELECT push_alerts FROM client_devices WHERE id=?").get(await latest()))?.push_alerts),
-          addedMailboxCount: (await app.db.prepare("SELECT COUNT(*) AS count FROM accounts WHERE email='added@example.com'").get()).count,
-          addedMailboxSyncEnabled: (await app.db.prepare("SELECT sync_enabled FROM accounts WHERE email='added@example.com'").get())?.sync_enabled ?? 0,
+          alertsEnabled: Boolean(
+            (
+              await app.db
+                .prepare("SELECT push_alerts FROM client_devices WHERE id=?")
+                .get(await latest())
+            )?.push_alerts,
+          ),
+          addedMailboxCount: (
+            await app.db
+              .prepare("SELECT COUNT(*) AS count FROM accounts WHERE email='added@example.com'")
+              .get()
+          ).count,
+          addedMailboxSyncEnabled:
+            (
+              await app.db
+                .prepare("SELECT sync_enabled FROM accounts WHERE email='added@example.com'")
+                .get()
+            )?.sync_enabled ?? 0,
           cancelledDownloads,
-          providerCredentialPresent: Boolean((await app.db.prepare("SELECT credential FROM accounts WHERE id='fixture-proxy'").get())?.credential),
-          persistentGrantPresent: Boolean((await app.db.prepare("SELECT sync_credential FROM accounts WHERE id='fixture-proxy'").get())?.sync_credential),
+          providerCredentialPresent: Boolean(
+            (await app.db.prepare("SELECT credential FROM accounts WHERE id='fixture-proxy'").get())
+              ?.credential,
+          ),
+          persistentGrantPresent: Boolean(
+            (
+              await app.db
+                .prepare("SELECT sync_credential FROM accounts WHERE id='fixture-proxy'")
+                .get()
+            )?.sync_credential,
+          ),
           sentMessages,
           inlineDownloads,
           bodyDownloads,

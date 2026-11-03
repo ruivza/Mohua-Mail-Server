@@ -18,12 +18,8 @@ test("sync route isolates tenants and rechecks revocation after upstream reads",
       mailboxOpen: async () => ({ uidValidity: 7n, uidNext: 11 }),
       fetchAll: async () => {
         if (revokeDuringRead)
-          await app.db
-            .prepare("DELETE FROM sessions WHERE user_id='one'")
-            .run();
-        return [
-          { uid: 10, flags: new Set(["\\Seen"]), envelope: { subject: "New" } },
-        ];
+          await app.db.prepare("DELETE FROM sessions WHERE user_id='one'").run();
+        return [{ uid: 10, flags: new Set(["\\Seen"]), envelope: { subject: "New" } }];
       },
     };
     job.client = client;
@@ -32,19 +28,19 @@ test("sync route isolates tenants and rechecks revocation after upstream reads",
   for (const id of ["one", "two"]) {
     await app.db
       .prepare("INSERT INTO users VALUES(?,?,?,?,?)")
-      .run(
-        id,
-        id + "@example.com",
-        passwordHash("password-for-test"),
-        "user",
-        1,
-      );
+      .run(id, id + "@example.com", passwordHash("password-for-test"), "user", 1);
   }
   await app.db
     .prepare(
       "INSERT INTO accounts(id,user_id,email,mode,credential,imap_host,imap_port,smtp_host,smtp_port) VALUES(?,?,?,?,?,'imap.example.com',993,'smtp.example.com',465)",
     )
-    .run("mailbox", "one", "mail@example.com", "proxy", "client-v1:" + JSON.stringify(clientCredential("fixture-only", "mailbox").envelope));
+    .run(
+      "mailbox",
+      "one",
+      "mail@example.com",
+      "proxy",
+      "client-v1:" + JSON.stringify(clientCredential("fixture-only", "mailbox").envelope),
+    );
   await authorizeFixture(app, "mailbox");
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -70,10 +66,7 @@ test("sync route isolates tenants and rechecks revocation after upstream reads",
     const owner = await login("one@example.com"),
       other = await login("two@example.com");
     const payload = { folder: "INBOX", uidValidity: "7", after: 9, known: [8] };
-    assert.equal(
-      (await call("/api/accounts/mailbox/sync", payload, other)).status,
-      404,
-    );
+    assert.equal((await call("/api/accounts/mailbox/sync", payload, other)).status, 404);
     const response = await call("/api/accounts/mailbox/sync", payload, owner);
     assert.equal(response.status, 200);
     const delta = await response.json();
@@ -84,10 +77,7 @@ test("sync route isolates tenants and rechecks revocation after upstream reads",
     );
     assert.deepEqual(delta.existing, []);
     revokeDuringRead = true;
-    assert.equal(
-      (await call("/api/accounts/mailbox/sync", payload, owner)).status,
-      401,
-    );
+    assert.equal((await call("/api/accounts/mailbox/sync", payload, owner)).status, 401);
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });

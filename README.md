@@ -27,7 +27,7 @@ node scripts/configure.mjs
 docker compose up -d --build --wait
 ```
 
-打开 http://127.0.0.1:3210。用本机 `.env` 中的 `SETUP_TOKEN` 创建首位管理员（密码至少 12 字符）。配置脚本生成独立随机数据库密码和设置令牌，已有 `.env` 不会被覆盖。Compose 自动加载该文件。
+打开 http://127.0.0.1:3210。用本机 `.env` 中的 `SETUP_TOKEN` 创建首位管理员（密码至少 12 字符）。配置脚本生成独立随机数据库密码、设置令牌和内部邮件令牌，并写入 `.env.example` 列出的其他变量及默认值；已有 `.env` 不会被覆盖，只补充缺失的变量，不打印秘密。Compose 自动加载该文件。
 
 此编排包括服务端、网页管理后台和 PostgreSQL；iOS App 仍用 Xcode 构建并连接服务端，不运行在 Linux 容器内。没有包含、修改或启动笑翠鸟网关。
 
@@ -47,6 +47,8 @@ docker compose -f compose.test.yaml down
 ```
 
 本机调试测试可先运行 `docker compose -f compose.test.yaml up -d --wait database`，设置 `TEST_DATABASE_URL=postgres://mohua_test:local-disposable-test-only@127.0.0.1:54329/mohua_test` 后运行 `npm test`。此密码仅属于临时测试容器。每个数据库测试使用独立 schema，测试结束自动删除，不访问正式应用数据。
+
+代码格式由 Prettier 统一（`.prettierrc`：行宽 100，保留文件现有换行符：仓库以 LF 保存，Windows 工作区经 Git autocrlf 检出为 CRLF，两者都能通过检查）。`npm run format:check` 检查，`npm run format` 改写；两者通过 `npx` 使用固定版本 3.3.3，需要联网，不加入依赖。CI 在测试前执行同一检查。Markdown 文档保持手工排版，不参与格式化。版本号以 `package.json` 为准，管理台侧栏显示同一版本，测试检查两者一致。
 
 ## 客户端连接
 
@@ -114,6 +116,7 @@ JSON 请求使用 `Content-Type: application/json`。登录后带 `Authorization
 | POST | `/api/accounts/:id/monitor` | 设置监听：enabled |
 | GET | `/api/client-devices` | 用户设备列表 |
 | DELETE | `/api/client-devices/:id` | 撤销设备 |
+| GET/DELETE | `/api/devices[/:id]` | 登录会话列表／撤销会话；用户会话被撤销时其设备及内存授权一并撤销 |
 | GET | `/api/client/sync` | 邮箱版本提示 |
 | POST | `/api/client/ack` | 确认设备同步进度：accountId,revision |
 | GET | `/api/client/push/config` | 当前网关、配置版本与设备通知状态 |
@@ -126,7 +129,7 @@ JSON 请求使用 `Content-Type: application/json`。登录后带 `Authorization
 | GET | `/api/accounts/:id/messages/:uid[/body或/attachments/:index]` | 元数据／正文流／附件流 |
 | POST | `/api/accounts/:id/messages/:uid/actions` | 整理邮件 |
 | POST | `/api/accounts/:id/outbox` | 准备发送，要求 Idempotency-Key |
-| PUT/GET | `/api/outbox/:id` | 上传并发送／查询结果 |
+| PUT/GET | `/api/outbox/:id` | 上传并发送／查询结果；其他方法与 `POST /api/outbox` 返回 405 |
 
 增量请求为 `{folder,uidValidity,after,known}`：after 是上次成功保存的 highWater，known 是最多 500 个已加载 UID。返回 `{uidValidity,highWater,hasMore,items,existing}`；items 仅包含 after 之后的新摘要，existing 仅包含所查询 UID 中仍存在的邮件及 flags。每次最多跨 1000 个 UID，UID 空洞仍推进 highWater；hasMore 为 true 时继续请求。只可把 known 中缺少的 UID 视为移除，不可推断其他 UID。客户端将行数据与 highWater 原子保存，失败不推进。现有账号级 revision 仅作提示，不能以单文件夹或部分列表同步冒充整个账号已完成 ack。
 
@@ -175,9 +178,9 @@ App、Xcode 工程、服务端和项目目录统一为 Mohua。小鸟图标来�
 - 项目目录：`Mohua`；服务端包：`mohua-server`。
 - iOS Bundle ID：`com.mohua.app`；测试包：`com.mohua.app.uitests`。
 - 数据库：PostgreSQL；Docker 数据卷：`mohua-postgres`、`mohua-keys`、`mohua-mail-keys`、`mohua-mail-files`（Compose 自动添加 `mohua_` 前缀）。
-- 推送应用 ID：`mohua`；同步载荷：`mohua`；登记挑战：`mohuaRegistration`。
+- 推送应用 ID：`mohua`（可用 `PUSH_GATEWAY_APP_ID` 修改，须与 iOS 构建一致）。Kookaburra Relay 0.3.0 的载荷名见下文「跟随 Kookaburra Relay 0.3.0」。
 - iOS 构建配置：`MOHUA_GATEWAY_URL`、`MOHUA_PUSH_ENVIRONMENT`。
-- 本次没有修改 Kookaburra Relay 网关。新版推送要求网关支持应用 ID `mohua`、载荷 `mohua` 和挑战 `mohuaRegistration`，并配置 APNs topic `com.mohua.app`；当前旧网关未适配前无法完成新版登记和推送。Apple Developer 的 App ID 和签名描述文件也必须匹配，真机需重新登记。
+- 网关需存在应用 `mohua` 并配置 APNs topic `com.mohua.app`。Apple Developer 的 App ID 和签名描述文件也必须匹配，真机需重新登记。
 
 运行 `npm run export:server` 生成 `dist/mohua-server`。仅此目录用于服务端分发。
 
@@ -234,6 +237,28 @@ docker compose start server
 新版网关可以要求服务器先获批。把 `/api/client/push/config` 或管理推送配置中的 `serverId` 登记到网关「服务器接入」，选择允许的 `mohua` 应用并批准。将只显示一次的凭证放入业务 Server 的 `GATEWAY_SERVER_CREDENTIAL`，同时设置 `GATEWAY_SERVER_CREDENTIAL_URL` 为对应 HTTPS 网关根地址。留空 URL 时绑定 `OFFICIAL_PUSH_GATEWAY_URL`。这两个变量已接入 Compose；它们不能放进 iOS 或公开源码。
 
 已登录客户端通过 `POST /api/client/push/ticket {}` 获取绑定自身设备的五分钟一次性票据。Server 的长期凭证不返回客户端；验证/投递请求额外携带服务器身份头，切换到其他网关不会转发原凭证。未配置凭证时票据为 null，兼容未强制审批的网关。先更新两端并完成登记验证，再在网关开启强制审批。轮换或封禁会撤销旧登记，需要客户端重新登记。
+
+## 跟随 Kookaburra Relay 0.3.0（2026-11-03）
+
+- Relay 新安装不再自动创建默认应用。请在网关控制台创建 ID 为 `mohua`（或 `PUSH_GATEWAY_APP_ID` 指定值）的应用，否则「测试连接」显示网关在线但未就绪。
+- Relay 新增推送协议 2，`/v1/status` 返回 `protocols:[1,2]`；协议 1 将在 Relay 下一版本移除。Server 的连接测试改为按 `protocols` 判断兼容（仅 1、2 被接受），不再只认 `protocol:1`。
+- `/api/client/push/config` 新增 `gatewayProtocols`（双方都支持的协议）与 `registrationProtocol`（建议客户端登记时发送的 `protocol`，当前为 2）。旧字段 `protocol:1` 保留给旧客户端。iOS 需在登记时发送 `"protocol":2` 并解析 `relayRegistration` 证明与 `relay:{version:2,kind:"sync"}` 同步提示，才能在 Relay 移除协议 1 后继续工作。
+- Server 到网关的 `/v1/validate`、`/v1/notify`、`/v1/server-tickets` 请求不随协议变化，始终发送 `appId`。
+- 网关状态缓存 60 秒（失败 10 秒），客户端频繁读取推送配置不再每次请求网关；切换网关后立即失效。
+
+## 安全与运维加固（2026-11-03）
+
+- 登录、注册、初始化和邮箱验证的限流按真实客户端地址计算：`TRUSTED_PROXY_HOPS`（Compose 默认 1，即自带 Nginx edge）取 `X-Forwarded-For` 右起对应项，IPv6 按 /64 合并。此前在 edge 之后所有客户端共用一个限额，任何人每分钟 21 次请求即可让所有用户无法登录。若 edge 前还有一层追加 `X-Forwarded-For` 的反向代理或隧道，设为 2；不要设得比实际代理层数多，否则客户端可伪造地址。
+- 密码校验改用异步 scrypt，不再阻塞事件循环；不存在的账号同样计算一次 scrypt，响应时间不再暴露邮箱是否注册。注册先检查邀请码再计算哈希。
+- 每分钟清理过期的用户/管理员会话和邀请；终态发信记录保留 90 天后删除，仍被草稿引用的保留。
+- 所有响应发送 `Referrer-Policy: no-referrer`；管理页 CSP 增加 `object-src 'none'`、`form-action 'self'`；静态脚本与样式发送 `Cache-Control: no-cache`。
+- 新增邮箱接口与验证一致，只接受 IMAP 993、SMTP 465/587。
+- 未预期的 500 错误记录一行日志（方法、屏蔽 ID 的路径、错误码），不含消息内容。
+- 数据库事务回滚失败时丢弃该连接，不再放回连接池。
+- 代理模式的内存邮箱授权在安装设备不再有未过期登录会话时结束（撤销会话、退出或到期），控制面与隔离部署一致；此前保留到授权自身到期。独立同步授权不受影响。详见 [客户端持钥](docs/CLIENT_CREDENTIAL_LEASES.md)。
+- 隔离部署中关闭后台监听只停止监听，不再撤销邮箱授权，与控制面一致。
+- 30 天内恢复邮箱保持删除前的模式，代理模式邮箱不再变成空的已暂停同步模式；同步遇到同一封邮件三次保存失败后跳过，不再让整个文件夹停滞；删除邮箱的清理每轮维护连续分批执行，不再限于每分钟 100 封。详见 [同步模式说明](SYNC_MODE_ZH.md)。
+- 配置脚本补全 `.env.example` 列出的变量；管理台状态轮询由 5 秒放宽到 15 秒（资源每分钟采样一次，手动自检后仍立即刷新）。
 
 
 ### 2026-09-29 邮箱验证与 worker 生命周期修复

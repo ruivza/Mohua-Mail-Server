@@ -8,8 +8,7 @@ const types = {
     if (oid === 20 && format !== "binary")
       return (value) => {
         const number = Number(value);
-        if (!Number.isSafeInteger(number))
-          throw Error("Database integer exceeds safe range");
+        if (!Number.isSafeInteger(number)) throw Error("Database integer exceeds safe range");
         return number;
       };
     return pg.types.getTypeParser(oid, format);
@@ -29,8 +28,7 @@ export class Database {
   ) {
     if (!connectionString && !process.env.PGHOST)
       throw Error("Configure DATABASE_URL or PGHOST for PostgreSQL");
-    if (!/^[a-z_][a-z0-9_]{0,62}$/.test(schema))
-      throw Error("Invalid database schema");
+    if (!/^[a-z_][a-z0-9_]{0,62}$/.test(schema)) throw Error("Invalid database schema");
     this.schema = schema;
     this.context = new AsyncLocalStorage();
     this.pool = new pg.Pool({
@@ -48,12 +46,10 @@ export class Database {
   async initialize() {
     await this.pool.query('CREATE SCHEMA IF NOT EXISTS "' + this.schema + '"');
     await this.transaction(async () => {
-      await this.query(
-        "SELECT pg_advisory_xact_lock(734621, hashtext(current_schema()))",
-      );
-      await this.exec(
-        readFileSync(new URL("./schema.sql", import.meta.url), "utf8"),
-      );
+      await this.query("SELECT pg_advisory_xact_lock(734621, hashtext(current_schema()))");
+      // Upgrades may build indexes on large existing tables; the per-request timeout must not abort startup.
+      await this.query("SET LOCAL statement_timeout = 0");
+      await this.exec(readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
     });
   }
   async claimOwner(onLost) {
@@ -62,8 +58,7 @@ export class Database {
       const { rows } = await client.query(
         "SELECT pg_try_advisory_lock(734622, hashtext(current_schema())) AS locked",
       );
-      if (!rows[0].locked)
-        throw Error("Another Mohua server is using this database schema");
+      if (!rows[0].locked) throw Error("Another Mohua server is using this database schema");
       this.owner = client;
       client.on("error", () => {
         this.ownerLost = true;
@@ -95,17 +90,21 @@ export class Database {
     if (this.context.getStore()) return operation();
     const connection = await this.pool.connect();
     const scope = { connection, finished: false };
+    let broken = false;
     try {
       await connection.query("BEGIN");
       const result = await this.context.run(scope, operation);
       await connection.query("COMMIT");
       return result;
     } catch (error) {
-      await connection.query("ROLLBACK").catch(() => {});
+      // A connection that cannot roll back may still hold an open transaction; never reuse it.
+      await connection.query("ROLLBACK").catch(() => {
+        broken = true;
+      });
       throw error;
     } finally {
       scope.finished = true;
-      connection.release();
+      connection.release(broken);
     }
   }
   async close() {
@@ -114,9 +113,7 @@ export class Database {
       this.owner = null;
       try {
         if (!this.ownerLost)
-          await client.query(
-            "SELECT pg_advisory_unlock(734622, hashtext(current_schema()))",
-          );
+          await client.query("SELECT pg_advisory_unlock(734622, hashtext(current_schema()))");
       } finally {
         client.release(this.ownerLost);
       }

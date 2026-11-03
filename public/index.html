@@ -4,83 +4,270 @@
     name="viewport"
     content="width=device-width,initial-scale=1"
   /><title>Mohua Mail</title
-  ><link rel="icon" type="image/png" href="/favicon.png" /><link rel="apple-touch-icon" href="/mohua.jpg" /><meta name="theme-color" content="#fafafa" /><script src="/preferences.js"></script><link rel="stylesheet" href="/style.css" />
+  ><link rel="icon" type="image/png" href="/favicon.png" /><link
+    rel="apple-touch-icon"
+    href="/mohua.jpg"
+  /><meta name="theme-color" content="#ffffff" />
+  <script src="/preferences.js"></script>
+  <link rel="stylesheet" href="/style.css" />
   <body class="signed-out">
     <aside>
-      <a class="logo" href="#overview" aria-label="Mohua 首页" data-i18n-label="Mohua 首页"><span class="logo-tile"><img src="/mohua.jpg" alt="" /></span><span>Mohua<small>MAIL SERVER</small></span></a>
+      <a class="logo" href="#overview" aria-label="Mohua 首页" data-i18n-label="Mohua 首页"
+        ><span class="logo-tile"><img src="/mohua.jpg" alt="" /></span
+        ><span>Mohua<small>MAIL SERVER</small></span></a
+      >
       <nav aria-label="主导航" data-i18n-label="主导航">
-        <a href="#overview"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span data-i18n="服务概览">服务概览</span></a><a href="#status"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h4l3-7 5 14 3-7h5"/></svg><span data-i18n="运行状态">运行状态</span></a
-        ><a href="#users"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m1-17a3 3 0 0 1 0 6m3 11v-3a6 6 0 0 0-2-4"/></svg><span data-i18n="用户管理">用户管理</span></a><a href="#settings"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="18" r="2"/></svg><span data-i18n="设置与会话">设置与会话</span></a>
+        <a href="#overview"
+          ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="3" width="7" height="7" rx="2" />
+            <rect x="14" y="3" width="7" height="7" rx="2" />
+            <rect x="3" y="14" width="7" height="7" rx="2" />
+            <rect x="14" y="14" width="7" height="7" rx="2" /></svg
+          ><span data-i18n="服务概览">服务概览</span></a
+        ><a href="#status"
+          ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M2 12h4l3-7 5 14 3-7h5" /></svg
+          ><span data-i18n="运行状态">运行状态</span></a
+        ><a href="#users"
+          ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="9" cy="8" r="3" />
+            <path d="M3 21v-3a6 6 0 0 1 12 0v3m1-17a3 3 0 0 1 0 6m3 11v-3a6 6 0 0 0-2-4" /></svg
+          ><span data-i18n="用户管理">用户管理</span></a
+        ><a href="#settings"
+          ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 6h16M4 12h16M4 18h16" />
+            <circle cx="9" cy="6" r="2" />
+            <circle cx="15" cy="12" r="2" />
+            <circle cx="9" cy="18" r="2" /></svg
+          ><span data-i18n="设置与会话">设置与会话</span></a
+        >
       </nav>
-      <footer><span class="version">MOHUA SERVER <b>v0.8.0</b></span></footer>
+      <footer>
+        <span class="version">MOHUA SERVER <b id="server-version">v0.8.0</b></span>
+      </footer>
     </aside>
     <main>
       <header>
         <div>
-
           <h1 id="page-title"><span data-i18n="服务概览">服务概览</span></h1>
         </div>
-        <div class="header-tools"><div class="preference-picker"><button type="button" id="theme" class="preference-trigger" aria-label="外观" data-i18n-label="外观" aria-haspopup="menu" aria-expanded="false" aria-controls="theme-menu"><span data-theme-icon="system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></span><span data-theme-icon="light" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg></span><span data-theme-icon="dark" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/></svg></span></button><div id="theme-menu" class="preference-menu" role="menu" aria-label="外观" data-i18n-label="外观" hidden><button type="button" role="menuitemradio" aria-checked="false" data-theme-option="system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span data-i18n="跟随系统">跟随系统</span><span class="preference-check" aria-hidden="true">✓</span></button><button type="button" role="menuitemradio" aria-checked="false" data-theme-option="light"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg><span data-i18n="浅色">浅色</span><span class="preference-check" aria-hidden="true">✓</span></button><button type="button" role="menuitemradio" aria-checked="false" data-theme-option="dark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/></svg><span data-i18n="深色">深色</span><span class="preference-check" aria-hidden="true">✓</span></button></div></div><div class="preference-picker"><button type="button" id="language" class="preference-trigger" aria-label="语言" data-i18n-label="语言" aria-haspopup="menu" aria-expanded="false" aria-controls="language-menu"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg></button><div id="language-menu" class="preference-menu" role="menu" aria-label="语言" data-i18n-label="语言" hidden><button type="button" role="menuitemradio" aria-checked="false" data-language-option="zh-CN"><span>中文</span><span class="preference-check" aria-hidden="true">✓</span></button><button type="button" role="menuitemradio" aria-checked="false" data-language-option="en"><span>English</span><span class="preference-check" aria-hidden="true">✓</span></button></div></div><button id="logout" class="secondary" hidden><span data-i18n="退出登录">退出登录</span></button></div>
+        <div class="header-tools">
+          <div class="preference-picker">
+            <button
+              type="button"
+              id="theme"
+              class="preference-trigger"
+              aria-label="外观"
+              data-i18n-label="外观"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="theme-menu"
+            >
+              <span data-theme-icon="system"
+                ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="4" width="18" height="13" rx="2" />
+                  <path d="M8 21h8m-4-4v4" /></svg></span
+              ><span data-theme-icon="light" hidden
+                ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4" />
+                  <path
+                    d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"
+                  /></svg></span
+              ><span data-theme-icon="dark" hidden
+                ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z" /></svg
+              ></span>
+            </button>
+            <div
+              id="theme-menu"
+              class="preference-menu"
+              role="menu"
+              aria-label="外观"
+              data-i18n-label="外观"
+              hidden
+            >
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-theme-option="system"
+              >
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="4" width="18" height="13" rx="2" />
+                  <path d="M8 21h8m-4-4v4" /></svg
+                ><span data-i18n="跟随系统">跟随系统</span
+                ><span class="preference-check" aria-hidden="true">✓</span></button
+              ><button
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-theme-option="light"
+              >
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4" />
+                  <path
+                    d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"
+                  /></svg
+                ><span data-i18n="浅色">浅色</span
+                ><span class="preference-check" aria-hidden="true">✓</span></button
+              ><button
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-theme-option="dark"
+              >
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z" /></svg
+                ><span data-i18n="深色">深色</span
+                ><span class="preference-check" aria-hidden="true">✓</span>
+              </button>
+            </div>
+          </div>
+          <div class="preference-picker">
+            <button
+              type="button"
+              id="language"
+              class="preference-trigger"
+              aria-label="语言"
+              data-i18n-label="语言"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="language-menu"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <ellipse cx="12" cy="12" rx="4" ry="9" />
+                <path d="M3 12h18" />
+              </svg>
+            </button>
+            <div
+              id="language-menu"
+              class="preference-menu"
+              role="menu"
+              aria-label="语言"
+              data-i18n-label="语言"
+              hidden
+            >
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-language-option="zh-CN"
+              >
+                <span>中文</span><span class="preference-check" aria-hidden="true">✓</span></button
+              ><button
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-language-option="en"
+              >
+                <span>English</span><span class="preference-check" aria-hidden="true">✓</span>
+              </button>
+            </div>
+          </div>
+          <button id="logout" class="secondary" hidden>
+            <span data-i18n="退出登录">退出登录</span>
+          </button>
+        </div>
       </header>
       <div id="message" role="status"></div>
       <div id="auth-shell" class="auth-shell">
-        <div class="auth-identity"><a class="auth-brand" href="/" aria-label="Mohua"><span class="logo-tile"><img src="/mohua.jpg" alt="" width="112" height="112" /></span><span>Mohua</span></a></div>
-        <section id="auth"><h2><span data-i18n="登录控制台">登录控制台</span></h2>
-        <form id="login">
-          <label
-            ><span data-i18n="邮箱">邮箱</span><input
-              name="email"
-              type="email"
-              required
-              autocomplete="username" /></label
-          ><label
-            ><span data-i18n="密码">密码</span><input
-              name="password"
-              type="password"
-              required
-              autocomplete="current-password" /></label
-          ><details class="login-options"><summary><span data-i18n="首次设置">首次设置</span></summary><label
-            ><span data-i18n="首次设置令牌">首次设置令牌</span><input
-              name="setupToken"
-              type="password"
-              autocomplete="off"
-          /></label>
-          <button type="button" id="setup" class="secondary"><span data-i18n="创建首位管理员">创建首位管理员</span></button></details><div class="actions">
-            <button type="submit"><span data-i18n="登录控制台">登录控制台</span></button
-            >
+        <div class="auth-identity">
+          <a class="auth-brand" href="/" aria-label="Mohua"
+            ><span class="logo-tile"><img src="/mohua.jpg" alt="" width="112" height="112" /></span
+            ><span>Mohua</span></a
+          >
+        </div>
+        <section id="auth">
+          <h2><span data-i18n="登录控制台">登录控制台</span></h2>
+          <form id="login">
+            <label
+              ><span data-i18n="邮箱">邮箱</span
+              ><input name="email" type="email" required autocomplete="username" /></label
+            ><label
+              ><span data-i18n="密码">密码</span
+              ><input name="password" type="password" required autocomplete="current-password"
+            /></label>
+            <details class="login-options">
+              <summary><span data-i18n="首次设置">首次设置</span></summary>
+              <label
+                ><span data-i18n="首次设置令牌">首次设置令牌</span
+                ><input name="setupToken" type="password" autocomplete="off"
+              /></label>
+              <button type="button" id="setup" class="secondary">
+                <span data-i18n="创建首位管理员">创建首位管理员</span>
+              </button>
+            </details>
+            <div class="actions">
+              <button type="submit"><span data-i18n="登录控制台">登录控制台</span></button>
+            </div>
+          </form>
+        </section>
+      </div>
+      <div id="dashboard" hidden>
+        <div id="overview" class="page">
+          <div class="overview-heading">
+            <span id="updated-at" class="muted"><span data-i18n="等待采样">等待采样</span></span>
           </div>
-        </form>
-      </section>
-      </div><div id="dashboard" hidden>
-        <div id="overview" class="page"><div class="overview-heading"><span id="updated-at" class="muted"><span data-i18n="等待采样">等待采样</span></span></div>
           <div id="cards" class="cards"></div>
           <section>
-            <div class="section-head"><h2><span data-i18n="服务器资源">服务器资源</span></h2><span class="badge"><span data-i18n="最近 24 小时">最近 24 小时</span></span></div>
-            <p><span data-i18n="当前进程资源与最近 24 小时趋势。用户与邮箱仅统计总量，不展示个人活动。">当前进程资源与最近 24 小时趋势。用户与邮箱仅统计总量，不展示个人活动。</span></p>
+            <div class="section-head">
+              <h2><span data-i18n="服务器资源">服务器资源</span></h2>
+              <span class="badge"><span data-i18n="最近 24 小时">最近 24 小时</span></span>
+            </div>
+            <p>
+              <span
+                data-i18n="当前进程资源与最近 24 小时趋势。用户与邮箱仅统计总量，不展示个人活动。"
+                >当前进程资源与最近 24 小时趋势。用户与邮箱仅统计总量，不展示个人活动。</span
+              >
+            </p>
             <div class="cards">
               <div>
                 <h3><span data-i18n="内存">内存</span><span>MB</span></h3>
                 <div id="memory-chart"></div>
               </div>
               <div>
-                <h3>CPU <span><span data-i18n="单核 %">单核 %</span></span></h3>
+                <h3>
+                  CPU <span><span data-i18n="单核 %">单核 %</span></span>
+                </h3>
                 <div id="cpu-chart"></div>
               </div>
             </div>
           </section>
         </div>
         <div id="status" class="page" hidden>
-          <p data-i18n="这里只展示业务健康；公网可用性由外部 Uptime 监测。">这里只展示业务健康；公网可用性由外部 Uptime 监测。</p>
+          <p data-i18n="这里只展示业务健康；公网可用性由外部 Uptime 监测。">
+            这里只展示业务健康；公网可用性由外部 Uptime 监测。
+          </p>
           <div id="business-health" class="operations-grid"></div>
-          <section><div class="section-head"><h2 data-i18n="业务接口">业务接口</h2><span class="muted" data-i18n="最近一小时 · 重启后重新统计">最近一小时 · 重启后重新统计</span></div>
-            <p data-i18n="排除健康检查和管理接口；耗时包含传输时间。">排除健康检查和管理接口；耗时包含传输时间。</p>
-            <div id="traffic-summary"></div><div id="recent-errors" class="panel-list"></div>
+          <section>
+            <div class="section-head">
+              <h2 data-i18n="业务接口">业务接口</h2>
+              <span class="muted" data-i18n="最近一小时 · 重启后重新统计"
+                >最近一小时 · 重启后重新统计</span
+              >
+            </div>
+            <p data-i18n="排除健康检查和管理接口；耗时包含传输时间。">
+              排除健康检查和管理接口；耗时包含传输时间。
+            </p>
+            <div id="traffic-summary"></div>
+            <div id="recent-errors" class="panel-list"></div>
           </section>
-          <section class="diagnostics-panel"><details><summary data-i18n="手动诊断 · 邮件沙箱">手动诊断 · 邮件沙箱</summary>
-            <div class="diagnostics-body"><div class="diagnostics-toolbar"><p data-i18n="仅测试独立沙箱，不代表用户邮箱或服务可用率。">仅测试独立沙箱，不代表用户邮箱或服务可用率。</p>
-            <button type="button" class="run-test" data-i18n="立即自检">立即自检</button></div>
-            <div id="latest-run" role="status"></div><div id="runs" class="panel-list" hidden></div></div>
-          </details></section>
+          <section class="diagnostics-panel">
+            <details>
+              <summary data-i18n="手动诊断 · 邮件沙箱">手动诊断 · 邮件沙箱</summary>
+              <div class="diagnostics-body">
+                <div class="diagnostics-toolbar">
+                  <p data-i18n="仅测试独立沙箱，不代表用户邮箱或服务可用率。">
+                    仅测试独立沙箱，不代表用户邮箱或服务可用率。
+                  </p>
+                  <button type="button" class="run-test" data-i18n="立即自检">立即自检</button>
+                </div>
+                <div id="latest-run" role="status"></div>
+                <div id="runs" class="panel-list" hidden></div>
+              </div>
+            </details>
+          </section>
         </div>
         <div id="users" class="page" hidden>
           <section>
@@ -88,7 +275,11 @@
               <h2><span data-i18n="用户管理">用户管理</span></h2>
               <button id="invite"><span data-i18n="生成邀请">生成邀请</span></button>
             </div>
-            <p><span data-i18n="管理访问权限，不展示用户邮箱和连接活动。">管理访问权限，不展示用户邮箱和连接活动。</span></p>
+            <p>
+              <span data-i18n="管理访问权限，不展示用户邮箱和连接活动。"
+                >管理访问权限，不展示用户邮箱和连接活动。</span
+              >
+            </p>
             <output id="invitation"></output>
             <div id="user-list" class="panel-list"></div>
           </section>
@@ -96,34 +287,54 @@
         <div id="settings" class="page" hidden>
           <section id="push-section">
             <h2><span data-i18n="推送网关">推送网关</span></h2>
-            <p><span data-i18n="只负责向客户端发送更新提示，邮件内容不经过网关。客户端用户可以关闭本设备通知。">只负责向客户端发送更新提示，邮件内容不经过网关。客户端用户可以关闭本设备通知。</span></p>
+            <p>
+              <span
+                data-i18n="只负责向客户端发送更新提示，邮件内容不经过网关。客户端用户可以关闭本设备通知。"
+                >只负责向客户端发送更新提示，邮件内容不经过网关。客户端用户可以关闭本设备通知。</span
+              >
+            </p>
             <form id="push-settings">
               <label
-                ><span data-i18n="推送方式">推送方式</span><select name="mode" id="push-mode">
+                ><span data-i18n="推送方式">推送方式</span
+                ><select name="mode" id="push-mode">
                   <option value="disabled" data-i18n="停用推送">停用推送</option>
                   <option value="official" data-i18n="使用官方网关">使用官方网关</option>
                   <option value="custom" data-i18n="使用自定义网关">使用自定义网关</option>
                 </select></label
               >
               <label id="custom-gateway-field" hidden
-                ><span data-i18n="自定义网关地址">自定义网关地址</span><input
-                  name="customUrl"
-                  type="url"
-                  placeholder="https://push.example.com"
+                ><span data-i18n="自定义网关地址">自定义网关地址</span
+                ><input name="customUrl" type="url" placeholder="https://push.example.com"
               /></label>
               <p id="push-description"></p>
               <div class="actions">
                 <button type="submit"><span data-i18n="保存推送设置">保存推送设置</span></button
-                ><button type="button" id="test-gateway" class="secondary"><span data-i18n="测试已保存的网关连接">测试已保存的网关连接</span></button>
+                ><button type="button" id="test-gateway" class="secondary">
+                  <span data-i18n="测试已保存的网关连接">测试已保存的网关连接</span>
+                </button>
               </div>
             </form>
             <p id="push-result" role="status"></p>
-            <p><span data-i18n="切换网关后，客户端需要重新登记。自定义网关需要配套客户端；这里不填写 APNs 私钥。">切换网关后，客户端需要重新登记。自定义网关需要配套客户端；这里不填写 APNs 私钥。</span></p>
+            <p>
+              <span
+                data-i18n="切换网关后，客户端需要重新登记。自定义网关需要配套客户端；这里不填写 APNs 私钥。"
+                >切换网关后，客户端需要重新登记。自定义网关需要配套客户端；这里不填写 APNs
+                私钥。</span
+              >
+            </p>
           </section>
           <section>
             <h2><span data-i18n="我的登录会话">我的登录会话</span></h2>
-            <p><span data-i18n="个人邮箱和设备请在 Mohua 客户端管理。">个人邮箱和设备请在 Mohua 客户端管理。</span></p>
-            <p><span data-i18n="这是登录会话，并非物理设备列表。撤销后旧凭证立即失效。">这是登录会话，并非物理设备列表。撤销后旧凭证立即失效。</span></p>
+            <p>
+              <span data-i18n="个人邮箱和设备请在 Mohua 客户端管理。"
+                >个人邮箱和设备请在 Mohua 客户端管理。</span
+              >
+            </p>
+            <p>
+              <span data-i18n="这是登录会话，并非物理设备列表。撤销后旧凭证立即失效。"
+                >这是登录会话，并非物理设备列表。撤销后旧凭证立即失效。</span
+              >
+            </p>
             <div id="devices" class="panel-list"></div>
           </section>
         </div>
